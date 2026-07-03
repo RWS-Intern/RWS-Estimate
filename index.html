@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Free Solar Rooftop Estimate | Rite Solar</title>
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+
+<div class="hero hero-ikd">
+  <div class="hero-inner">
+    <div class="hero-main">
+      <div class="logo-chip"><img class="logo-img" src="assets/img/rite-solar-logo.png" alt="Rite Solar"></div>
+      <div class="eyebrow">Rite Solar Presents &mdash; A Fixed-Asset Investment Opportunity</div>
+      <div class="hero-headline">
+        <span class="hk1">Investment Ka</span>
+        <span class="hk2">Dhurandhar</span>
+      </div>
+      <div class="hero-rule"></div>
+
+      <div class="hero-sub active" id="heroSubLanding">
+        <h1 class="hero-sub-h">See what solar could earn you</h1>
+        <p class="hero-sub-p">Upload your latest MSEDCL electricity bill and we'll size a rooftop solar
+          system for your business and estimate the 25-year return &mdash; no site
+          visit required to get started.</p>
+      </div>
+
+      <div class="hero-sub" id="heroSubResults">
+        <div class="hero-sub-h">Prepared for <span class="hero-company" id="heroCompanyName"></span></div>
+      </div>
+    </div>
+
+    <div class="hero-photo"><img src="assets/img/advisor.png" alt=""></div>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <!-- ===================== STEP 1: ENTRY FORM ===================== -->
+  <section id="step-entry" class="step active">
+    <div class="card">
+      <h2>Tell us about your business</h2>
+      <div class="csub">Takes under a minute. We'll read your bill automatically.</div>
+
+      <form id="entryForm" novalidate>
+        <div class="field" id="f-name">
+          <label for="in-name">Name</label>
+          <input type="text" id="in-name" name="name" autocomplete="name" placeholder="Your name">
+          <div class="errmsg">Please enter your name.</div>
+        </div>
+
+        <div class="field" id="f-mobile">
+          <label for="in-mobile">Mobile number</label>
+          <input type="tel" id="in-mobile" name="mobile" autocomplete="tel" placeholder="10-digit mobile number" maxlength="10" inputmode="numeric">
+          <div class="errmsg">Please enter a valid 10-digit mobile number.</div>
+        </div>
+
+        <div class="field" id="f-category">
+          <label>Category</label>
+          <div class="radiorow">
+            <label id="lbl-commercial"><input type="radio" name="category" value="Commercial"> Commercial</label>
+            <label id="lbl-industrial"><input type="radio" name="category" value="Industrial"> Industrial</label>
+          </div>
+          <div class="errmsg">Please select a category.</div>
+        </div>
+
+        <div class="field" id="f-bill">
+          <label>Electricity bill</label>
+          <div class="uploadbox" id="uploadBox">
+            <div class="icn">&#128196;</div>
+            <div class="main">Click to upload, or drag &amp; drop</div>
+            <div class="sub">PDF, JPG or PNG &middot; we'll resize it automatically</div>
+            <div class="filename" id="fileName"></div>
+            <input type="file" id="in-bill" name="bill" accept=".pdf,.jpg,.jpeg,.png,image/jpeg,image/png,application/pdf">
+          </div>
+          <div class="errmsg">Please upload your electricity bill.</div>
+        </div>
+
+        <button type="submit" class="btn" id="submitBtn">Get my free estimate</button>
+        <div class="note">We only use your bill to size and price your solar
+          system. Nothing is shared with third parties.</div>
+      </form>
+    </div>
+  </section>
+
+  <!-- ===================== STEP 2: LOADING ===================== -->
+  <section id="step-loading" class="step">
+    <div class="card loading">
+      <div class="spinner"></div>
+      <div class="msg">Reading your bill&hellip;</div>
+      <div class="sub">This usually takes a few seconds.</div>
+    </div>
+  </section>
+
+  <!-- ===================== STEP 3: CONFIRM ===================== -->
+  <section id="step-confirm" class="step">
+    <div class="card">
+      <h2>Check your details</h2>
+      <div class="csub">We've pulled these values from your bill &mdash; please
+        correct anything that looks wrong before we calculate your estimate.</div>
+
+      <div id="confirmNote"></div>
+
+      <form id="confirmForm">
+
+        <div class="section-label">Customer &amp; Tariff</div>
+        <div class="grid2" id="customerFieldsGrid"><!-- fields injected by JS, null/flagged ones first --></div>
+
+        <div class="section-label">Current Month &mdash; Rates</div>
+        <div class="grid2" id="rateFieldsGrid"><!-- fields injected by JS, null/flagged ones first --></div>
+        <div class="note">Rates must be in Rs per unit, not paise. If a rate
+          looks 100&times; too large, divide it by 100.</div>
+
+        <div class="section-label">Time-of-Day (ToD) Slots</div>
+        <table class="tod-table">
+          <thead><tr><th>Slot</th><th>Units</th><th>Rate (Rs/unit)</th></tr></thead>
+          <tbody id="todBody"><!-- rows injected by JS --></tbody>
+        </table>
+        <div class="note">The 09:00&ndash;17:00 daytime rate is often
+          <em>negative</em> (a rebate) &mdash; that's expected, don't remove the minus sign.</div>
+
+        <div class="section-label">Billing History (units, most recent first)</div>
+        <div class="note warn" id="historyNote" style="display:none"></div>
+        <div class="history-grid" id="historyGrid"><!-- rows injected by JS --></div>
+
+        <div class="confirm-actions">
+          <button type="button" class="btn" id="confirmBtn">Confirm &amp; see my estimate</button>
+          <button type="button" class="btn secondary" id="startOverBtn">Start over</button>
+        </div>
+        <div class="note error" id="formulationError" style="display:none"></div>
+      </form>
+    </div>
+
+    <!-- ============= DASHBOARD: rendered in place below the confirm form ============= -->
+    <div id="dashboardSection" style="display:none">
+
+      <div class="card">
+        <div class="kpis">
+          <div class="kpi gold"><div class="num" id="d_k_irr"></div><div class="lab">IRR</div><div class="sub">selected scenario</div></div>
+          <div class="kpi grn"><div class="num" id="d_k_earn"></div><div class="lab">Net Earnings (25 yrs)</div><div class="sub">after recovering capital</div></div>
+          <div class="kpi"><div class="num" id="d_k_yield"></div><div class="lab">Avg Annual Yield</div><div class="sub">avg earning &divide; capital</div></div>
+          <div class="kpi"><div class="num" id="d_k_pay"></div><div class="lab">Capital Payback</div><div class="sub">years</div></div>
+          <div class="kpi"><div class="num" id="d_k_npv"></div><div class="lab">Net Present Value</div><div class="sub">@ 12% discount</div></div>
+          <div class="kpi"><div class="num" id="d_k_mult"></div><div class="lab">Money Multiple</div><div class="sub">value back &divide; your capital</div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>How we sized your plant &amp; priced each unit</h2>
+        <div class="csub">Both are worked out from your own MSEDCL bill &mdash; nothing assumed.</div>
+        <div class="why">
+          <div class="whyc"><h4 id="d_why_size_h"></h4><p id="d_why_size_p"></p></div>
+          <div class="whyc"><h4 id="d_why_rate_h"></h4><p id="d_why_rate_p"></p></div>
+        </div>
+      </div>
+
+      <div class="card compare">
+        <h2>Where else does <span id="d_cmp_amt"></span> work this hard?</h2>
+        <div class="csub">Your net capital outlay vs. the same money in conventional,
+          capital-protected instruments &mdash; over 25 years (all-cash basis).</div>
+        <div class="bigstat">
+          <div class="bs win"><div class="t">This Solar Investment &mdash; value back over 25 yrs</div><div class="n" id="d_c_solar"></div></div>
+        </div>
+        <div class="chartbox sm"><canvas id="d_chart_cmp"></canvas></div>
+        <div class="note" id="d_cmp_note"></div>
+      </div>
+
+      <div class="card">
+        <h2>Your Investment Terms</h2>
+        <div class="csub">Sized &amp; priced from your bill. Adjust your tax position and financing below.</div>
+
+        <div class="locked">
+          <div class="lh">Fixed Parameters</div>
+          <div class="prow"><span>Asset (system) size</span><span class="pv" id="d_o_size"></span></div>
+          <div class="prow"><span>Capital outlay (incl. GST)</span><span class="pv" id="d_o_price"></span></div>
+          <div class="prow"><span>Net capital (after GST credit)</span><span class="pv" id="d_o_net"></span></div>
+          <div class="prow"><span>Annual generation</span><span class="pv" id="d_o_gen"></span></div>
+          <div class="prow"><span>Electricity tariff escalation</span><span class="pv" id="d_o_esc"></span></div>
+          <div class="prow net"><span>Effective rate (net ToD &amp; GSC)</span><span class="pv" id="d_o_rate"></span></div>
+        </div>
+
+        <div class="section-label">Your Tax Position</div>
+        <div class="toggle-row"><span>Claim accelerated depreciation?</span>
+          <label class="switch"><input type="checkbox" id="d_t_dep"><span class="slider"></span></label></div>
+        <div class="sfield" id="d_taxwrap">
+          <label>Your tax rate <span class="val"><span id="d_v_tax"></span>%</span></label>
+          <div class="rangewrap"><input type="range" id="d_r_tax" min="15" max="35" step="1"><input type="number" id="d_n_tax"></div>
+        </div>
+
+        <div class="section-label">Financing (Optional Leverage)</div>
+        <div class="toggle-row"><span>Fund via a bank loan?</span>
+          <label class="switch"><input type="checkbox" id="d_t_loan"><span class="slider"></span></label></div>
+        <div class="loanbox off" id="d_loanbox">
+          <div class="sfield"><label>Down payment <span class="val"><span id="d_v_dp"></span>%</span></label>
+            <div class="rangewrap"><input type="range" id="d_r_dp" min="10" max="100" step="5"><input type="number" id="d_n_dp"></div></div>
+          <div class="sfield"><label>Loan interest rate <span class="val"><span id="d_v_rate"></span>%</span></label>
+            <div class="rangewrap"><input type="range" id="d_r_rate" min="7" max="15" step="0.25"><input type="number" id="d_n_rate"></div></div>
+          <div class="sfield"><label>Tenure <span class="val"><span id="d_v_ten"></span> mo</span></label>
+            <div class="rangewrap"><input type="range" id="d_r_ten" min="12" max="120" step="6"><input type="number" id="d_n_ten"></div></div>
+        </div>
+
+        <div class="section-label">Comparison Benchmark</div>
+        <div class="sfield">
+          <label>Your alternative FD rate <span class="val"><span id="d_v_fd"></span>%</span></label>
+          <div class="rangewrap"><input type="range" id="d_r_fd" min="3" max="9" step="0.25"><input type="number" id="d_n_fd"></div>
+          <div class="hint">What your bank pays on a fixed deposit (pre-tax).</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Technical Snapshot</h2>
+        <div class="csub">Indicative plant specification (final on site survey).</div>
+        <div class="spec">
+          <div class="srow"><span>Plant capacity</span><b id="d_spec_kwp"></b></div>
+          <div class="srow"><span>Module count (est., ~580 Wp bifacial)</span><b id="d_spec_panels"></b></div>
+          <div class="srow"><span>Metering</span><b>Net metering (bidirectional)</b></div>
+          <div class="srow"><span>Est. annual generation (Year 1)</span><b id="d_spec_gen"></b></div>
+          <div class="srow"><span>Monitoring</span><b>Wi-Fi remote monitoring</b></div>
+          <div class="srow"><span>Warranty</span><b>Modules 25-yr perf. / Inverter 5-10 yr</b></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="tabs">
+          <button type="button" class="tab active" data-tab="lump">Lump-sum Investment</button>
+          <button type="button" class="tab" data-tab="lev">Leveraged (with loan)</button>
+        </div>
+
+        <div class="tabpane active" id="d_pane_lump">
+          <h2>Your Capital, Compounding for 25 Years</h2>
+          <div class="csub">Cumulative cash returned to you, vs the same capital in a fixed deposit.</div>
+          <div class="chartbox"><canvas id="d_chart_lump"></canvas></div>
+          <div class="statline">
+            <div class="stat good"><div class="v" id="d_s_earn"></div><div class="k">Total net earnings (after capital)</div></div>
+            <div class="stat"><div class="v" id="d_s_avg"></div><div class="k">Average earning per year</div></div>
+            <div class="stat"><div class="v" id="d_s_back"></div><div class="k">Total cash returned (25 yrs)</div></div>
+            <div class="stat"><div class="v" id="d_s_lcoe"></div><div class="k">Your cost of power (LCOE)</div></div>
+          </div>
+          <div class="verdict" id="d_lump_verdict"></div>
+          <details class="tbl"><summary>View the full 25-year cash-flow schedule</summary>
+            <div class="tbl-scroll"><table id="d_tbl_lump"></table></div></details>
+        </div>
+
+        <div class="tabpane" id="d_pane_lev">
+          <h2>Leverage: A Bigger Return on Your Own Cash</h2>
+          <div class="csub">Put in a fraction as down payment, let the savings cover the EMI &mdash;
+            and your return on equity multiplies.</div>
+          <div class="chartbox"><canvas id="d_chart_lev"></canvas></div>
+          <div class="statline">
+            <div class="stat"><div class="v" id="d_l_dp"></div><div class="k">Your cash in (down payment + fees)</div></div>
+            <div class="stat gold" style="background:#fff7e0"><div class="v" id="d_l_roe"></div><div class="k">Return on your cash (levered IRR)</div></div>
+            <div class="stat"><div class="v" id="d_l_emi"></div><div class="k">Monthly EMI</div></div>
+            <div class="stat good"><div class="v" id="d_l_net1"></div><div class="k">Net cash in hand / month (Yr 1)</div></div>
+            <div class="stat bad"><div class="v" id="d_l_int"></div><div class="k">Total interest over loan</div></div>
+            <div class="stat good"><div class="v" id="d_l_25"></div><div class="k">Net earnings 25 yrs (financed)</div></div>
+          </div>
+          <div class="verdict" id="d_lev_verdict"></div>
+        </div>
+      </div>
+
+      <div class="card pdf-download">
+        <h2>Your estimate, ready to share</h2>
+        <div class="csub">A clean, branded PDF with your numbers, charts and the full 25-year schedule &mdash; no sliders or buttons, just the report.</div>
+        <button type="button" class="btn" id="downloadPdfBtn">Download my report (PDF)</button>
+        <div class="note" id="pdfStatusNote" style="display:none"></div>
+      </div>
+
+    </div>
+  </section>
+
+</div>
+
+<footer>
+  <p><span class="brand">Rite Solar</span> &mdash; Powering Homes the Right Way</p>
+  <p style="margin-top:6px">This tool gives an illustrative estimate only and
+    is not a binding quotation.</p>
+</footer>
+
+<!-- pdf.js: renders a PDF's first page to an image in the browser (so the
+     server always receives an image, never has to rasterise a PDF itself —
+     shared hosting has no Imagick+Ghostscript / no shell binaries). -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<!-- Chart.js for the dashboard, matching reference/estimate.html's version. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<!-- jsPDF + autotable: builds the branded, client-ready PDF report from
+     scratch (text/tables/embedded chart images) — never a screenshot of
+     the interactive dashboard. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<script src="assets/config-defaults.js"></script>
+<script src="assets/formulation.js"></script>
+<script src="assets/engine.js"></script>
+<script src="assets/charts.js"></script>
+<script src="assets/report.js"></script>
+<script src="assets/js/app.js"></script>
+</body>
+</html>

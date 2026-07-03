@@ -1,0 +1,16 @@
+# api/config.php is deliberately NOT git-ignored — it holds only getenv()
+# reads + REPLACE_ME placeholder fallbacks, no real secrets (see the file
+# itself, DEPLOY.md, and DEPLOY-RENDER.md). Real values live in Render's
+# env vars, or are edited directly on the server for Hostinger — never in
+# this repo.
+.claude/
+# Composer dependencies — installed via `composer install` on deploy
+/vendor/
+composer.lock
+
+# Runtime scratch space (if extract.php ever writes temp files)
+/uploads/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db

@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin — Rite Solar Estimate</title>
+<link rel="stylesheet" href="/assets/css/style.css">
+<link rel="stylesheet" href="/assets/css/admin.css">
+</head>
+<body>
+
+<div class="hero admin-hero">
+  <div class="logo"><span class="r">Rite</span> <span class="s">Solar</span><span class="dot"></span></div>
+  <div class="eyebrow">Admin</div>
+  <h1>Estimate tool settings</h1>
+  <p>Edit the constants the public estimate tool uses to size and price every quote.</p>
+</div>
+
+<div class="wrap">
+
+  <!-- ===================== LOGIN ===================== -->
+  <section id="loginSection" class="step">
+    <div class="card admin-login">
+      <h2>Sign in</h2>
+      <div class="csub">Admin accounts are created manually — there is no sign-up here.</div>
+      <div id="loginError"></div>
+      <form id="loginForm" novalidate>
+        <div class="field" id="f-email">
+          <label for="in-email">Email</label>
+          <input type="email" id="in-email" autocomplete="username" placeholder="you@ritesolar.in">
+        </div>
+        <div class="field" id="f-password">
+          <label for="in-password">Password</label>
+          <input type="password" id="in-password" autocomplete="current-password" placeholder="Password">
+        </div>
+        <button type="submit" class="btn" id="loginBtn">Sign in</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- ===================== CONFIG PANEL ===================== -->
+  <section id="panelSection" class="step">
+    <div class="card admin-topbar">
+      <div class="admin-who">Signed in as <b id="whoEmail"></b></div>
+      <button type="button" class="btn secondary admin-logout" id="logoutBtn">Log out</button>
+    </div>
+
+    <div class="card">
+      <div class="tabs">
+        <button type="button" class="tab active" data-admintab="config">Constants</button>
+        <button type="button" class="tab" data-admintab="leads">Leads</button>
+      </div>
+    </div>
+
+    <div class="card tabpane active" id="adminPaneConfig">
+      <h2>Constants</h2>
+      <div class="csub">Changes apply to every NEW estimate as soon as you save
+        &mdash; the public page reads this fresh on every load. Estimates already
+        shown to a customer are not recalculated.</div>
+
+      <div id="loadError"></div>
+      <div id="configForm"><!-- field groups injected by admin.js --></div>
+
+      <div class="confirm-actions">
+        <button type="button" class="btn" id="saveBtn">Save changes</button>
+      </div>
+      <div id="saveToast"></div>
+      <div class="admin-updated" id="updatedNote"></div>
+    </div>
+
+    <div class="card tabpane" id="adminPaneLeads">
+      <h2>Submissions / Leads</h2>
+      <div class="csub">Everyone who has used the estimate tool, most recent
+        first &mdash; including bounced leads that never reached a result.</div>
+
+      <div id="leadsError"></div>
+
+      <div class="confirm-actions">
+        <button type="button" class="btn secondary" id="downloadLeadsBtn" disabled>Download as Excel</button>
+      </div>
+
+      <div class="tbl-scroll leads-scroll">
+        <table id="leadsTable" class="leads-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Company</th>
+              <th>Mobile</th>
+              <th>Category</th>
+              <th>Stage</th>
+              <th class="num">Offered kWp</th>
+              <th class="num">Effective tariff (&#8377;/unit)</th>
+              <th class="num">IRR (%)</th>
+              <th class="num">Payback (yrs)</th>
+              <th class="num">Net capital (&#8377;)</th>
+              <th>Bill file</th>
+              <th>Report file</th>
+            </tr>
+          </thead>
+          <tbody id="leadsBody"><!-- rows injected by admin.js --></tbody>
+        </table>
+      </div>
+      <div class="admin-updated" id="leadsCount"></div>
+    </div>
+  </section>
+
+</div>
+
+<footer>
+  <p><span class="brand">Rite Solar</span> &mdash; Admin</p>
+</footer>
+
+<!-- Supabase JS v2, pinned to the major version (not an exact patch, unlike
+     pdf.js/Chart.js elsewhere in this project) — the v2 API surface used
+     here (auth.signInWithPassword/getSession/signOut, from().select/update)
+     is stable across v2 patches, and jsdelivr's @2 alias always resolves to
+     a real published build, which an exact-but-possibly-wrong patch pin
+     would not. -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<!-- SheetJS (xlsx), bundled locally under assets/vendor/ — not loaded from a
+     CDN at runtime, same discipline as the PDF fonts under assets/fonts/.
+     Builds the "Download as Excel" file for the Leads table. -->
+<script src="/assets/vendor/xlsx.full.min.js"></script>
+<script src="/admin/config.js"></script>
+<script src="/admin/admin.js"></script>
+</body>
+</html>

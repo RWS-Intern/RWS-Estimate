@@ -1,0 +1,9 @@
+# Rebuilt fresh inside the image (see Dockerfile's composer stage) — never
+# trust a locally-generated vendor/ into the build context.
+vendor/
+
+# Not part of the deployed app.
+.git
+.gitignore
+.DS_Store
+Thumbs.db

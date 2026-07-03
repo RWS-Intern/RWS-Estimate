@@ -1,0 +1,45 @@
+/**
+ * assets/css/admin.css — small additions layered on top of style.css,
+ * specific to /admin/. Kept in its own file (not appended to style.css) so
+ * the public estimate page never has to load admin-only CSS weight.
+ * Everything here reuses style.css's existing components/variables
+ * (.card, .field, .hint, .section-label, .grid2, .toggle-row, .switch,
+ * .note, .btn, .step/.step.active) rather than introducing new ones.
+ */
+
+.admin-hero{padding:28px 0 22px}
+.admin-hero h1{font-size:20px}
+.admin-hero p{font-size:13px}
+
+.admin-login{max-width:400px}
+
+.admin-topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.admin-who{font-size:13px;color:var(--rs-navy)}
+.admin-who b{color:var(--rs-blue)}
+.admin-logout{width:auto;padding:9px 18px}
+
+.admin-updated{margin-top:10px;font-size:11.5px;color:var(--rs-muted)}
+
+.admin-group{margin-bottom:22px}
+.admin-group:last-child{margin-bottom:0}
+
+/* Boolean fields use the dashboard's existing .toggle-row/.switch pattern,
+   but need two lines of text (label + hint) instead of one bold line. */
+.admin-bool{align-items:flex-start;font-weight:normal}
+.admin-bool > div:first-child > div:first-child{font-weight:bold;color:var(--rs-navy);font-size:13px}
+.admin-bool .switch{flex:none;margin-top:2px}
+
+/* Leads table — reuses .tbl-scroll/.tabs/.tabpane from style.css (built for
+   the public dashboard's 25-year schedule and tab bar) rather than
+   introducing a parallel set of table/tab styles. Overrides just the
+   alignment: that table is all-numeric (right-aligned by default); this one
+   is mostly text, with only a handful of numeric columns. */
+.leads-scroll{max-height:480px}
+#leadsTable th,#leadsTable td{text-align:left;white-space:nowrap}
+#leadsTable th.num,#leadsTable td.num{text-align:right}
+
+/* Bill/Report "Download" buttons — styled as a plain link, not a bordered
+   button, since it sits inline inside a table cell. */
+.leads-dl-btn{background:none;border:none;padding:0;margin:0;color:var(--rs-blue);font-weight:bold;font-size:12px;font-family:Arial;cursor:pointer;text-decoration:underline}
+.leads-dl-btn:hover{color:var(--rs-navy)}
+.leads-dl-btn:disabled{color:var(--rs-muted);cursor:default;text-decoration:none}

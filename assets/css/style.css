@@ -1,0 +1,269 @@
+:root{
+  --rs-blue:#00AFEF; --rs-red:#ED3237; --rs-gold:#FAB520; --rs-navy:#003A5C;
+  --rs-gray:#F5F5F5; --rs-text:#2a3338; --rs-muted:#6b7780; --rs-white:#fff;
+  --rs-green:#1a9e57; --rs-deep:#012438;
+  /* "Investment Ka Dhurandhar" palette — matches assets/report.js's PDF
+     hero exactly. Kept separate from --rs-navy/--rs-gold above (used
+     elsewhere on the page, e.g. buttons) so this redesign only touches the
+     hero band, scoped under .hero-ikd below. */
+  --ikd-navy:#0B3A53; --ikd-deep:#072A3D; --ikd-gold:#F5A800;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Arial,Helvetica,sans-serif;color:var(--rs-text);background:var(--rs-gray);line-height:1.5}
+.wrap{max-width:900px;margin:0 auto;padding:0 16px 60px}
+@media(max-width:480px){.wrap{padding:0 10px 40px}}
+
+.hero{background:linear-gradient(135deg,#012438,#004a73);color:#fff;padding:34px 0 30px;text-align:center}
+.hero .logo{font-weight:bold;font-size:26px;margin-bottom:10px}
+.hero .logo .r{color:#fff}.hero .logo .s{color:var(--rs-blue)}
+.hero .logo .dot{display:inline-block;width:8px;height:8px;background:var(--rs-red);border-radius:50%;margin-left:3px;vertical-align:middle}
+
+/* The logo file has a near-white background — on the dark navy hero it
+   needs to sit on its own chip rather than float as a pale rectangle. */
+.logo-chip{display:inline-block;background:#fff;border-radius:10px;padding:8px 16px;margin-bottom:14px;box-shadow:0 1px 4px rgba(0,0,0,.15)}
+.logo-img{display:block;height:38px;width:auto}
+.hero .eyebrow{font-size:12px;letter-spacing:2px;text-transform:uppercase;color:var(--rs-gold);font-weight:bold;margin-bottom:10px}
+.hero h1{font-size:26px;margin-bottom:8px;line-height:1.3}
+.hero p{color:#d6eefa;font-size:14px;max-width:560px;margin:0 auto}
+
+/* ===== "Investment Ka Dhurandhar" hero (index.html only — admin/index.html
+   still uses the plain .hero/.admin-hero text-logo header above, untouched).
+   Everything here is scoped under .hero-ikd so it can't leak into that
+   simpler header, which shares the base .hero class. ===== */
+/* No bottom padding on the band itself — the flex row below reaches all
+   the way to .hero-ikd's true bottom edge so .hero-photo (align-items:
+   flex-end, the row's default) can bleed flush against it. .hero-main
+   supplies its OWN bottom padding instead (and opts out of the row's
+   bottom alignment via align-self:flex-start) so the TEXT still gets the
+   same breathing room as before, independent of the photo's height. */
+.hero-ikd{background:linear-gradient(135deg,var(--ikd-deep),var(--ikd-navy));text-align:left;padding:26px 0 0;overflow:hidden}
+/* min-height is a FLOOR, deliberately less than .hero-photo img's height
+   below — the photo must always be the taller flex child so the row (and
+   so the whole band) sizes itself around the photo, not the other way
+   round. If the photo were ever shorter than this floor, a gap would open
+   above it again (the original bug), so keep these two numbers in sync. */
+.hero-ikd .hero-inner{max-width:900px;margin:0 auto;padding:0 16px;display:flex;align-items:flex-end;justify-content:space-between;gap:16px;min-height:260px}
+.hero-ikd .hero-main{flex:1 1 auto;min-width:0;max-width:520px;align-self:flex-start;padding-bottom:26px}
+.hero-ikd .hero-headline{margin:2px 0 0}
+.hero-ikd .hk1,.hero-ikd .hk2{display:block;font-size:32px;line-height:1.08;font-weight:900;text-transform:uppercase;letter-spacing:.3px}
+.hero-ikd .hk1{color:#fff}
+.hero-ikd .hk2{color:var(--ikd-gold)}
+.hero-ikd .hero-rule{width:64px;height:4px;background:var(--ikd-gold);border-radius:2px;margin:12px 0 16px}
+.hero-ikd .hero-sub{display:none}
+.hero-ikd .hero-sub.active{display:block}
+.hero-ikd .hero-sub-h{font-size:19px;font-weight:bold;color:#fff;margin:0 0 6px;line-height:1.3}
+.hero-ikd .hero-sub-p{color:#d6eefa;font-size:13.5px;max-width:520px;margin:0}
+.hero-ikd .hero-company{color:var(--ikd-gold)}
+/* Deliberately TALLER than .hero-inner's min-height above so the photo is
+   always the flex row's tallest child — that's what makes the row (and the
+   whole band) grow to match the photo, not the other way round, in both
+   the landing view's longer paragraph and the results view's one-line
+   "Prepared for {name}". align-items:flex-end (the row's default) then
+   bleeds it flush against the band's true bottom edge with zero gap, and
+   since the photo is the tallest child, its top lands at the row's own
+   top — flush with the band's top padding, "spanning the band" per the
+   reference PDF hero, not floating with empty navy above or below it. */
+.hero-ikd .hero-photo{flex:0 0 auto;margin-right:-16px;align-self:flex-end;line-height:0}
+.hero-ikd .hero-photo img{display:block;height:300px;width:auto}
+
+@media(max-width:640px){
+  .hero-ikd .hero-inner{flex-direction:column;align-items:flex-start;gap:4px}
+  .hero-ikd .hero-main{max-width:none;padding-bottom:18px}
+  .hero-ikd .hero-photo{display:none}
+  .hero-ikd .hk1,.hero-ikd .hk2{font-size:26px}
+  .hero-ikd .hero-sub-h{font-size:17px}
+}
+
+.card{background:#fff;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,.08);padding:20px;margin:20px auto}
+.card h2{color:var(--rs-navy);font-size:17px;margin-bottom:4px}
+.card .csub{color:var(--rs-muted);font-size:12.5px;margin-bottom:16px}
+@media(max-width:480px){.card{padding:15px}}
+
+.section-label{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--rs-muted);font-weight:bold;margin:20px 0 10px;border-bottom:1px solid #eee;padding-bottom:4px}
+.section-label:first-child{margin-top:0}
+
+.field{margin-bottom:14px}
+.field label{display:block;font-size:13px;font-weight:bold;color:var(--rs-navy);margin-bottom:5px}
+.field .hint{font-size:11px;color:var(--rs-muted);margin-top:3px;font-weight:normal}
+.field input[type=text],
+.field input[type=tel],
+.field input[type=number],
+.field select{
+  width:100%;padding:9px 10px;border:1px solid #cdd6db;border-radius:6px;
+  font-size:14px;font-family:Arial;color:var(--rs-text);background:#fff;
+}
+.field input:focus,.field select:focus{outline:none;border-color:var(--rs-blue);box-shadow:0 0 0 3px rgba(0,175,239,.15)}
+.field input.err{border-color:var(--rs-red)}
+.field .errmsg{color:var(--rs-red);font-size:11.5px;margin-top:4px;display:none}
+.field.has-err .errmsg{display:block}
+
+.radiorow{display:flex;gap:10px}
+.radiorow label{
+  flex:1;display:flex;align-items:center;justify-content:center;gap:6px;
+  padding:10px;border:1px solid #cdd6db;border-radius:6px;font-size:13.5px;
+  font-weight:bold;color:var(--rs-navy);cursor:pointer;background:#fff;
+}
+.radiorow input{accent-color:var(--rs-blue)}
+.radiorow label.checked{border-color:var(--rs-blue);background:#f0faff}
+@media(max-width:360px){.radiorow{flex-direction:column}}
+
+.uploadbox{
+  border:2px dashed #cdd6db;border-radius:8px;padding:22px;text-align:center;
+  cursor:pointer;transition:.15s;background:#fbfdff;
+}
+.uploadbox:hover,.uploadbox.drag{border-color:var(--rs-blue);background:#f0faff}
+.uploadbox .icn{font-size:28px;margin-bottom:6px}
+.uploadbox .main{font-size:13.5px;font-weight:bold;color:var(--rs-navy)}
+.uploadbox .sub{font-size:11.5px;color:var(--rs-muted);margin-top:3px}
+.uploadbox .filename{margin-top:10px;font-size:12.5px;color:var(--rs-blue);font-weight:bold;word-break:break-all}
+.uploadbox input[type=file]{display:none}
+
+.btn{
+  background:var(--rs-gold);color:#1a1a1a;border:none;padding:13px 26px;
+  font-weight:bold;font-size:14.5px;border-radius:6px;cursor:pointer;
+  font-family:Arial;width:100%;
+}
+.btn:hover{filter:brightness(1.05)}
+.btn:disabled{opacity:.55;cursor:not-allowed}
+.btn.secondary{background:var(--rs-gray);color:var(--rs-navy);border:1px solid #cdd6db}
+
+.note{font-size:12px;color:var(--rs-muted);margin-top:12px;background:#fbfdff;border:1px solid #e7eef2;border-radius:6px;padding:10px}
+.note.warn{background:#fff7e0;border-color:#f3dfa0;color:#7a5b00}
+.note.error{background:#fdeceb;border-color:#f3c6c3;color:#a12b26}
+
+/* ===== loading step ===== */
+.loading{text-align:center;padding:60px 20px}
+.spinner{
+  width:44px;height:44px;border:4px solid #e2e9ed;border-top-color:var(--rs-blue);
+  border-radius:50%;margin:0 auto 18px;animation:spin 0.8s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+.loading .msg{color:var(--rs-navy);font-weight:bold;font-size:15px}
+.loading .sub{color:var(--rs-muted);font-size:13px;margin-top:6px}
+
+/* ===== confirm step ===== */
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:520px){.grid2{grid-template-columns:1fr}}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+@media(max-width:640px){.grid4{grid-template-columns:repeat(2,1fr)}}
+
+.tod-table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:6px}
+.tod-table th{background:var(--rs-navy);color:#fff;padding:8px 6px;font-size:11px;text-align:center}
+.tod-table td{padding:6px;border-bottom:1px solid #eee;text-align:center}
+.tod-table input{width:100%;padding:6px;border:1px solid #cdd6db;border-radius:5px;text-align:center;font-size:13px}
+@media(max-width:400px){
+  .tod-table{font-size:11px}
+  .tod-table th{padding:6px 3px;font-size:9.5px}
+  .tod-table td{padding:4px 3px}
+  .tod-table input{padding:5px 3px;font-size:12px}
+}
+
+.history-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+@media(max-width:520px){.history-grid{grid-template-columns:repeat(2,1fr)}}
+.history-item label{font-size:10.5px;color:var(--rs-muted);display:block;margin-bottom:3px}
+.history-item input{width:100%;padding:7px;border:1px solid #cdd6db;border-radius:5px;font-size:13px;text-align:right}
+
+.confirm-actions{margin-top:22px;display:flex;flex-direction:column;gap:10px}
+
+/* ===== needs_review / quality-gate styling ===== */
+.field.reviewme input,.field.reviewme select{border-color:var(--rs-gold);background:#fff9e8}
+.reviewnote{margin-top:6px;font-size:11.5px;color:#7a5b00;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.fixit-btn{background:#fff;border:1px solid var(--rs-gold);color:#7a5b00;border-radius:4px;padding:3px 9px;font-size:11px;cursor:pointer;font-weight:bold;font-family:Arial}
+.fixit-btn:hover{background:#fff3d6}
+.tod-table tr.reviewme td{background:#fff7e0}
+.tod-table tr.reviewme input{border-color:var(--rs-gold)}
+.history-item.reviewme input{border-color:var(--rs-gold);background:#fff9e8}
+
+/* ===== dashboard (financial engine), ported from reference/estimate.html ===== */
+.locked{background:var(--rs-gray);border:1px solid #e2e9ed;border-radius:8px;padding:12px;margin-bottom:8px}
+.locked .lh{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--rs-muted);font-weight:bold;margin-bottom:10px}
+.prow{display:flex;justify-content:space-between;font-size:12.5px;padding:5px 0;border-bottom:1px dashed #dde4e8}
+.prow:last-child{border-bottom:none}
+.prow .pv{font-weight:bold;color:var(--rs-navy)}
+.prow.net{background:#eafaf2;margin:4px -6px 0;padding:6px;border-radius:5px;border-bottom:none}
+.prow.net .pv{color:var(--rs-green)}
+
+/* .sfield is deliberately its own class (not .field) so dashboard sliders
+   can't accidentally restyle the confirm-form's fields via a shared selector. */
+.sfield{margin-bottom:14px}
+.sfield label{display:flex;justify-content:space-between;font-size:13px;font-weight:bold;color:var(--rs-navy);margin-bottom:5px}
+.sfield .val{color:var(--rs-blue)}
+.sfield .rangewrap{display:flex;align-items:center;gap:8px}
+.sfield input[type=range]{width:100%;accent-color:var(--rs-blue);height:5px}
+.sfield input[type=number]{width:70px;padding:5px 6px;border:1px solid #cdd6db;border-radius:6px;font-size:13px;text-align:right;font-family:Arial}
+.sfield .hint{font-size:11px;color:var(--rs-muted);margin-top:3px}
+
+.toggle-row{display:flex;align-items:center;justify-content:space-between;font-size:13px;font-weight:bold;color:var(--rs-navy);margin-bottom:8px}
+.switch{position:relative;display:inline-block;width:46px;height:24px}
+.switch input{opacity:0;width:0;height:0}
+.switch .slider{position:absolute;cursor:pointer;inset:0;background:#c4ccd1;transition:.2s;border-radius:24px}
+.switch .slider:before{content:"";position:absolute;height:18px;width:18px;left:3px;bottom:3px;background:#fff;transition:.2s;border-radius:50%}
+.switch input:checked+.slider{background:var(--rs-blue)}
+.switch input:checked+.slider:before{transform:translateX(22px)}
+.loanbox{border-top:1px dashed #d8e0e4;margin-top:10px;padding-top:12px}
+.loanbox.off{display:none}
+
+.compare{background:linear-gradient(135deg,#fff,#f3fbff);border:1px solid #d4ebf7}
+.bigstat{display:grid;grid-template-columns:1fr;gap:14px;margin-bottom:8px}
+.bs{padding:12px;border-radius:8px;background:var(--rs-gray)}
+.bs .t{font-size:11.5px;color:var(--rs-muted)}
+.bs .n{font-size:24px;font-weight:bold;color:var(--rs-navy)}
+.bs.win{background:#eafaf2}
+.bs.win .n{color:var(--rs-green)}
+.chartbox{position:relative;height:300px;margin:8px 0 4px}
+.chartbox.sm{height:240px}
+@media(max-width:480px){.chartbox{height:230px}.chartbox.sm{height:200px}}
+
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:18px}
+@media(max-width:620px){.kpis{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:400px){.kpis{grid-template-columns:1fr}}
+.kpi{background:#fff;border-radius:10px;padding:13px;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,.08);border-top:3px solid var(--rs-blue)}
+.kpi.gold{border-top-color:var(--rs-gold)}
+.kpi.grn{border-top-color:var(--rs-green)}
+.kpi .num{font-size:21px;font-weight:bold;color:var(--rs-navy);line-height:1.1}
+.kpi .lab{font-size:11px;color:var(--rs-muted);margin-top:5px}
+.kpi .sub{font-size:10px;color:var(--rs-blue);margin-top:2px}
+
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+.tab{padding:9px 15px;border-radius:8px 8px 0 0;background:#e6edf1;color:var(--rs-navy);font-weight:bold;font-size:13px;cursor:pointer;border:none;font-family:Arial}
+.tab.active{background:var(--rs-blue);color:#fff}
+@media(max-width:480px){
+  .tabs{flex-direction:column}
+  .tab{width:100%;border-radius:8px;text-align:center}
+}
+.tabpane{display:none}
+.tabpane.active{display:block}
+.statline{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:14px}
+@media(max-width:400px){.statline{grid-template-columns:1fr}}
+.stat{background:var(--rs-gray);border-radius:8px;padding:10px 12px}
+.stat .v{font-size:16px;font-weight:bold;color:var(--rs-navy)}
+.stat .k{font-size:11.5px;color:var(--rs-muted)}
+.stat.good .v{color:var(--rs-green)}
+.stat.bad .v{color:var(--rs-red)}
+.verdict{margin-top:14px;background:#eafaf2;border:1px solid #bfe9d2;border-radius:8px;padding:12px;color:#136b41;font-weight:bold;font-size:14px}
+
+.why{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-top:6px}
+@media(max-width:620px){.why{grid-template-columns:1fr}}
+.whyc{background:#fff;border-left:4px solid var(--rs-gold);border-radius:6px;padding:12px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.whyc h4{color:var(--rs-navy);font-size:13.5px;margin-bottom:4px}
+.whyc p{font-size:12px;color:var(--rs-muted)}
+
+details.tbl{margin-top:14px}
+details.tbl summary{cursor:pointer;font-weight:bold;color:var(--rs-blue);font-size:13px;padding:6px 0}
+.tbl-scroll{max-height:320px;overflow:auto;border:1px solid #eee;border-radius:6px}
+.tbl-scroll table{width:100%;border-collapse:collapse;font-size:11.5px;margin-top:8px}
+.tbl-scroll th,.tbl-scroll td{padding:6px;text-align:right;border-bottom:1px solid #eee}
+.tbl-scroll th{background:var(--rs-navy);color:#fff;position:sticky;top:0;font-size:10.5px}
+.tbl-scroll td:first-child,.tbl-scroll th:first-child{text-align:center}
+
+.spec{font-size:12.5px}
+.srow{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px dashed #e5ebee}
+.srow:last-child{border-bottom:none}
+.srow span{color:var(--rs-muted)}
+.srow b{color:var(--rs-navy);text-align:right;font-size:12px}
+
+footer{text-align:center;color:var(--rs-muted);font-size:11px;padding:24px 16px}
+footer .brand{color:var(--rs-navy);font-weight:bold}
+
+.step{display:none}
+.step.active{display:block}

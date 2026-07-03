@@ -1,0 +1,12 @@
+{
+    "name": "ritesolar/estimate",
+    "description": "Bill extraction backend for estimate.ritesolar.in",
+    "type": "project",
+    "require": {
+        "php": ">=7.4",
+        "smalot/pdfparser": "^2.11"
+    },
+    "config": {
+        "optimize-autoloader": true
+    }
+}
