@@ -771,7 +771,7 @@
     document.getElementById("d_cmp_amt").textContent = "₹" + (inv / 1e5).toFixed(1) + " lakh";
     document.getElementById("d_k_irr").textContent = irrPct;
     document.getElementById("d_k_earn").textContent = inrShort(m.profit);
-    document.getElementById("d_k_yield").textContent = (m.avgOper / inv * 100).toFixed(0) + "%";
+    document.getElementById("d_k_yield").textContent = "₹" + m.lcoe.toFixed(2) + "/unit";
     document.getElementById("d_k_pay").textContent = (m.payback != null ? m.payback.toFixed(1) : "—");
     document.getElementById("d_k_npv").textContent = inrShort(m.npvV);
     document.getElementById("d_k_mult").textContent = m.multiple.toFixed(1) + "x";
