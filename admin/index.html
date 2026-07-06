@@ -5,8 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Admin — Rite Solar Estimate</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
-<link rel="stylesheet" href="/assets/css/style.css">
-<link rel="stylesheet" href="/assets/css/admin.css">
+<!-- bump ?v= when style.css changes, to bust browser/CDN cache -->
+<link rel="stylesheet" href="/assets/css/style.css?v=1">
+<!-- bump ?v= when admin.css changes, to bust browser/CDN cache -->
+<link rel="stylesheet" href="/assets/css/admin.css?v=1">
 </head>
 <body>
 
@@ -122,8 +124,11 @@
 <!-- SheetJS (xlsx), bundled locally under assets/vendor/ — not loaded from a
      CDN at runtime, same discipline as the PDF fonts under assets/fonts/.
      Builds the "Download as Excel" file for the Leads table. -->
-<script src="/assets/vendor/xlsx.full.min.js"></script>
-<script src="/admin/config.js"></script>
-<script src="/admin/admin.js"></script>
+<!-- bump ?v= when xlsx.full.min.js changes, to bust browser/CDN cache -->
+<script src="/assets/vendor/xlsx.full.min.js?v=1"></script>
+<!-- bump ?v= when config.js changes, to bust browser/CDN cache -->
+<script src="/admin/config.js?v=1"></script>
+<!-- bump ?v= when admin.js changes, to bust browser/CDN cache -->
+<script src="/admin/admin.js?v=1"></script>
 </body>
 </html>
