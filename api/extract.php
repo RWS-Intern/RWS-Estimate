@@ -6,11 +6,15 @@
  * SPEC.md for the field-name contract. Summary:
  *
  * The client ALWAYS sends one or more images (`bill_image[]`) — a single
- * downscaled photo, or one rendered image PER PAGE of a PDF via pdf.js in
- * the browser (MSEDCL bills spread billing details/ToD/history across
- * several pages, not just page 1). When the original upload was a PDF, the
- * client ALSO sends the original file (`bill_pdf`) so this endpoint can try
- * a free text-layer fast-path before paying for a vision call.
+ * downscaled photo, two downscaled photos (front + optional back, for
+ * customers whose bill details spill onto a second page), or one rendered
+ * image PER PAGE of a PDF via pdf.js in the browser (MSEDCL bills spread
+ * billing details/ToD/history across several pages, not just page 1).
+ * Every entry lands in the SAME vision message regardless of source, so a
+ * front+back photo pair is read exactly like any other multi-image bill.
+ * When the original upload was a PDF, the client ALSO sends the original
+ * file (`bill_pdf`) so this endpoint can try a free text-layer fast-path
+ * before paying for a vision call.
  *
  * Response contract (always JSON):
  *   {"success": true,

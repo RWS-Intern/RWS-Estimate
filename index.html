@@ -68,12 +68,33 @@
 
         <div class="field" id="f-bill">
           <label>Electricity bill</label>
-          <div class="uploadbox" id="uploadBox">
-            <div class="icn">&#128196;</div>
-            <div class="main">Click to upload, or drag &amp; drop</div>
-            <div class="sub">PDF, JPG or PNG &middot; we'll resize it automatically</div>
-            <div class="filename" id="fileName"></div>
-            <input type="file" id="in-bill" name="bill" accept=".pdf,.jpg,.jpeg,.png,image/jpeg,image/png,application/pdf">
+          <div class="billslots" id="billSlots">
+            <div class="uploadbox billslot front" id="uploadBoxFront">
+              <div class="thumb-wrap" id="thumbWrapFront" style="display:none">
+                <img class="thumb-img" id="thumbImgFront" alt="">
+                <button type="button" class="thumb-clear" id="clearFront" aria-label="Remove file">&times;</button>
+              </div>
+              <div class="pick" id="pickFront">
+                <div class="icn">&#128196;</div>
+                <div class="main">Bill &ndash; Front</div>
+                <div class="sub">PDF, JPG or PNG &middot; we'll resize it automatically</div>
+                <div class="filename" id="fileNameFront"></div>
+              </div>
+              <input type="file" id="in-bill-front" name="bill_front" accept=".pdf,.jpg,.jpeg,.png,image/jpeg,image/png,application/pdf">
+            </div>
+            <div class="uploadbox billslot back" id="uploadBoxBack">
+              <div class="thumb-wrap" id="thumbWrapBack" style="display:none">
+                <img class="thumb-img" id="thumbImgBack" alt="">
+                <button type="button" class="thumb-clear" id="clearBack" aria-label="Remove file">&times;</button>
+              </div>
+              <div class="pick" id="pickBack">
+                <div class="icn">&#128196;</div>
+                <div class="main">Bill &ndash; Back <span class="optional">(optional)</span></div>
+                <div class="sub">JPG or PNG &middot; if your bill details spill onto a second page</div>
+                <div class="filename" id="fileNameBack"></div>
+              </div>
+              <input type="file" id="in-bill-back" name="bill_back" accept=".jpg,.jpeg,.png,image/jpeg,image/png">
+            </div>
           </div>
           <div class="errmsg">Please upload your electricity bill.</div>
         </div>

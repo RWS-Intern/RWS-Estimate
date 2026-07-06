@@ -40,9 +40,21 @@
   var entryForm = document.getElementById("entryForm");
   var nameInput = document.getElementById("in-name");
   var mobileInput = document.getElementById("in-mobile");
-  var billInput = document.getElementById("in-bill");
-  var uploadBox = document.getElementById("uploadBox");
-  var fileNameEl = document.getElementById("fileName");
+  var billFrontInput = document.getElementById("in-bill-front");
+  var billBackInput = document.getElementById("in-bill-back");
+  var billSlotsEl = document.getElementById("billSlots");
+  var uploadBoxFront = document.getElementById("uploadBoxFront");
+  var uploadBoxBack = document.getElementById("uploadBoxBack");
+  var pickFront = document.getElementById("pickFront");
+  var pickBack = document.getElementById("pickBack");
+  var fileNameFrontEl = document.getElementById("fileNameFront");
+  var fileNameBackEl = document.getElementById("fileNameBack");
+  var thumbWrapFront = document.getElementById("thumbWrapFront");
+  var thumbWrapBack = document.getElementById("thumbWrapBack");
+  var thumbImgFront = document.getElementById("thumbImgFront");
+  var thumbImgBack = document.getElementById("thumbImgBack");
+  var clearFrontBtn = document.getElementById("clearFront");
+  var clearBackBtn = document.getElementById("clearBack");
   var submitBtn = document.getElementById("submitBtn");
   var billErrMsgEl = document.querySelector("#f-bill .errmsg");
   var DEFAULT_BILL_ERR = billErrMsgEl.textContent;
@@ -66,27 +78,135 @@
     });
   });
 
-  uploadBox.addEventListener("click", function () { billInput.click(); });
-  ["dragover", "dragenter"].forEach(function (evt) {
-    uploadBox.addEventListener(evt, function (e) { e.preventDefault(); uploadBox.classList.add("drag"); });
-  });
-  ["dragleave", "drop"].forEach(function (evt) {
-    uploadBox.addEventListener(evt, function (e) { e.preventDefault(); uploadBox.classList.remove("drag"); });
-  });
-  uploadBox.addEventListener("drop", function (e) {
-    var files = e.dataTransfer.files;
-    if (files && files.length) {
-      billInput.files = files;
-      onBillSelected();
-    }
-  });
-  billInput.addEventListener("change", onBillSelected);
-
-  function onBillSelected() {
-    var f = billInput.files[0];
-    fileNameEl.textContent = f ? f.name : "";
-    clearError("f-bill");
+  /** Front slot accepts a PDF (page-by-page rendering already handles the
+   *  multi-page case) OR a single photo. Back slot is photo-only — MSEDCL
+   *  bills split across a PDF already carry every page, so a second image
+   *  is only meaningful when the customer is uploading loose photos. */
+  function isPdfFile(file) {
+    return /\.pdf$/i.test(file.name) || file.type === "application/pdf";
   }
+  function isAllowedImageFile(file) {
+    return /\.(jpe?g|png)$/i.test(file.name) || ["image/jpeg", "image/png"].indexOf(file.type) !== -1;
+  }
+  function isAllowedFrontFile(file) {
+    return isPdfFile(file) || isAllowedImageFile(file);
+  }
+
+  function previewObjectUrl(file, imgEl) {
+    var url = URL.createObjectURL(file);
+    imgEl.onload = function () { URL.revokeObjectURL(url); };
+    imgEl.src = url;
+  }
+
+  function showFrontPreview(file) {
+    fileNameFrontEl.textContent = file.name;
+    pickFront.classList.add("has-file");
+    if (isPdfFile(file)) {
+      thumbWrapFront.style.display = "none";
+    } else {
+      previewObjectUrl(file, thumbImgFront);
+      thumbWrapFront.style.display = "";
+    }
+  }
+  function clearFrontPreview() {
+    fileNameFrontEl.textContent = "";
+    pickFront.classList.remove("has-file");
+    thumbWrapFront.style.display = "none";
+    thumbImgFront.removeAttribute("src");
+  }
+  function showBackPreview(file) {
+    fileNameBackEl.textContent = file.name;
+    pickBack.classList.add("has-file");
+    previewObjectUrl(file, thumbImgBack);
+    thumbWrapBack.style.display = "";
+  }
+  function clearBackPreview() {
+    fileNameBackEl.textContent = "";
+    pickBack.classList.remove("has-file");
+    thumbWrapBack.style.display = "none";
+    thumbImgBack.removeAttribute("src");
+  }
+
+  /** A PDF front upload already covers every page of the bill, so the back
+   *  slot is irrelevant then — hide it and drop anything that was in it. */
+  function setBackSlotEnabled(enabled) {
+    billSlotsEl.classList.toggle("pdf-mode", !enabled);
+    if (!enabled) {
+      billBackInput.value = "";
+      clearBackPreview();
+    }
+  }
+
+  function onFrontSelected() {
+    var f = billFrontInput.files[0];
+    if (!f) { clearFrontPreview(); setBackSlotEnabled(true); return; }
+    if (!isAllowedFrontFile(f)) {
+      setBillError("Please upload a PDF, JPG or PNG file.");
+      billFrontInput.value = "";
+      clearFrontPreview();
+      return;
+    }
+    if (f.size > RAW_FILE_MAX_BYTES) {
+      setBillError("That file is too large. Please upload a bill under 20 MB.");
+      billFrontInput.value = "";
+      clearFrontPreview();
+      return;
+    }
+    clearError("f-bill");
+    showFrontPreview(f);
+    setBackSlotEnabled(!isPdfFile(f));
+  }
+
+  function onBackSelected() {
+    var f = billBackInput.files[0];
+    if (!f) { clearBackPreview(); return; }
+    if (!isAllowedImageFile(f)) {
+      setBillError("The back page must be a JPG or PNG image.");
+      billBackInput.value = "";
+      clearBackPreview();
+      return;
+    }
+    if (f.size > RAW_FILE_MAX_BYTES) {
+      setBillError("That file is too large. Please upload an image under 20 MB.");
+      billBackInput.value = "";
+      clearBackPreview();
+      return;
+    }
+    clearError("f-bill");
+    showBackPreview(f);
+  }
+
+  function wireBillSlot(box, input, onSelected) {
+    box.addEventListener("click", function () { input.click(); });
+    ["dragover", "dragenter"].forEach(function (evt) {
+      box.addEventListener(evt, function (e) { e.preventDefault(); box.classList.add("drag"); });
+    });
+    ["dragleave", "drop"].forEach(function (evt) {
+      box.addEventListener(evt, function (e) { e.preventDefault(); box.classList.remove("drag"); });
+    });
+    box.addEventListener("drop", function (e) {
+      var files = e.dataTransfer.files;
+      if (files && files.length) {
+        input.files = files;
+        onSelected();
+      }
+    });
+    input.addEventListener("change", onSelected);
+  }
+  wireBillSlot(uploadBoxFront, billFrontInput, onFrontSelected);
+  wireBillSlot(uploadBoxBack, billBackInput, onBackSelected);
+
+  clearFrontBtn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    billFrontInput.value = "";
+    clearFrontPreview();
+    setBackSlotEnabled(true);
+  });
+  clearBackBtn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    billBackInput.value = "";
+    clearBackPreview();
+  });
 
   function setError(fieldId, show) {
     var el = document.getElementById(fieldId);
@@ -113,17 +233,23 @@
     var category = document.querySelector('input[name="category"]:checked');
     if (!category) { setError("f-category", true); ok = false; } else { clearError("f-category"); }
 
-    var file = billInput.files[0];
-    if (!file) {
+    var frontFile = billFrontInput.files[0];
+    var backFile = billBackInput.files[0];
+    if (!frontFile) {
       setError("f-bill", true); ok = false;
+    } else if (!isAllowedFrontFile(frontFile)) {
+      setError("f-bill", true); ok = false;
+    } else if (frontFile.size > RAW_FILE_MAX_BYTES) {
+      setBillError("That file is too large. Please upload a bill under 20 MB.");
+      ok = false;
+    } else if (backFile && !isAllowedImageFile(backFile)) {
+      setBillError("The back page must be a JPG or PNG image.");
+      ok = false;
+    } else if (backFile && backFile.size > RAW_FILE_MAX_BYTES) {
+      setBillError("That file is too large. Please upload an image under 20 MB.");
+      ok = false;
     } else {
-      var okType = /\.(pdf|jpe?g|png)$/i.test(file.name) ||
-        ["application/pdf", "image/jpeg", "image/png"].indexOf(file.type) !== -1;
-      if (!okType) { setError("f-bill", true); ok = false; }
-      else if (file.size > RAW_FILE_MAX_BYTES) {
-        setBillError("That file is too large. Please upload a bill under 20 MB.");
-        ok = false;
-      } else { clearError("f-bill"); }
+      clearError("f-bill");
     }
 
     return ok;
@@ -221,14 +347,26 @@
   }
 
   /** Always resolves to {imageFiles, pdfFile}. imageFiles has one entry per
-   *  PDF page (or a single entry for a photo upload). pdfFile is non-null
-   *  only when the original upload was a PDF (sent alongside the rendered
-   *  images so the server can still try its free text-layer fast path). */
-  function prepareUpload(file) {
-    var isPdf = /\.pdf$/i.test(file.name) || file.type === "application/pdf";
-    var task = isPdf
-      ? renderPdfPagesToImages(file).then(function (imageFiles) { return { imageFiles: imageFiles, pdfFile: file }; })
-      : downscaleImage(file).then(function (imageFile) { return { imageFiles: [imageFile], pdfFile: null }; });
+   *  PDF page, or one (front only) / two (front+back) entries for a photo
+   *  upload. pdfFile is non-null only when the original upload was a PDF
+   *  (sent alongside the rendered images so the server can still try its
+   *  free text-layer fast path). backFile is ignored when frontFile is a
+   *  PDF — the UI already hides/clears the back slot in that case. */
+  function prepareUpload(frontFile, backFile) {
+    var isPdf = isPdfFile(frontFile);
+    var task;
+    if (isPdf) {
+      task = renderPdfPagesToImages(frontFile).then(function (imageFiles) {
+        return { imageFiles: imageFiles, pdfFile: frontFile };
+      });
+    } else {
+      task = downscaleImage(frontFile).then(function (frontImage) {
+        if (!backFile) return { imageFiles: [frontImage], pdfFile: null };
+        return downscaleImage(backFile).then(function (backImage) {
+          return { imageFiles: [frontImage, backImage], pdfFile: null };
+        });
+      });
+    }
     return task.catch(function (err) {
       err.stage = "prepare";
       throw err;
@@ -255,16 +393,18 @@
       .catch(function () { return null; });
   }
 
-  /** Uploads the ORIGINAL bill file (not the downscaled/rendered images
-   *  sent to extract.php) once extraction has succeeded. Silently no-ops if
-   *  there's no lead row to attach it to. */
-  function uploadBillFile(rawFile) {
+  /** Uploads the ORIGINAL bill file(s) (not the downscaled/rendered images
+   *  sent to extract.php) once extraction has succeeded. backFile is
+   *  optional — only sent when the customer uploaded a loose back-of-bill
+   *  photo. Silently no-ops if there's no lead row to attach it to. */
+  function uploadBillFile(frontFile, backFile) {
     if (!currentSubmission.idPromise) return;
     currentSubmission.idPromise.then(function (id) {
       if (!id) return null;
       var fd = new FormData();
       fd.append("id", id);
-      fd.append("bill_file", rawFile, rawFile.name);
+      fd.append("bill_file_front", frontFile, frontFile.name);
+      if (backFile) fd.append("bill_file_back", backFile, backFile.name);
       return fetch("api/upload_bill.php", { method: "POST", body: fd });
     }).catch(function (err) {
       console.warn("Bill upload failed (non-fatal):", err);
@@ -336,7 +476,8 @@
     e.preventDefault();
     if (!validateEntryForm()) return;
 
-    var rawFile = billInput.files[0];
+    var frontFile = billFrontInput.files[0];
+    var backFile = isPdfFile(frontFile) ? null : (billBackInput.files[0] || null);
     // Kicked off now, awaited later (by uploadBillFile/persistCompletedSubmission)
     // — never blocks extraction, which is what actually gates the UI.
     currentSubmission.idPromise = createLead(
@@ -347,7 +488,7 @@
     submitBtn.disabled = true;
     showStep("step-loading");
 
-    prepareUpload(rawFile).then(function (result) {
+    prepareUpload(frontFile, backFile).then(function (result) {
       var fd = new FormData();
       fd.append("name", nameInput.value.trim());
       fd.append("mobile", mobileInput.value.trim());
@@ -364,7 +505,7 @@
     }).then(function (json) {
       submitBtn.disabled = false;
       if (json && json.success) {
-        uploadBillFile(rawFile);
+        uploadBillFile(frontFile, backFile);
         renderConfirmForm(json.data, json.needs_review || {}, json.suggested_corrections || {}, json.quality || "ok", null);
       } else {
         renderConfirmForm(blankExtraction(), {}, {}, "poor",
@@ -616,8 +757,11 @@
       retryBtn.style.marginTop = "10px";
       retryBtn.textContent = "Upload a clearer photo instead";
       retryBtn.addEventListener("click", function () {
-        billInput.value = "";
-        fileNameEl.textContent = "";
+        billFrontInput.value = "";
+        billBackInput.value = "";
+        clearFrontPreview();
+        clearBackPreview();
+        setBackSlotEnabled(true);
         clearError("f-bill");
         showStep("step-entry");
       });
@@ -961,7 +1105,11 @@
 
   document.getElementById("startOverBtn").addEventListener("click", function () {
     entryForm.reset();
-    fileNameEl.textContent = "";
+    billFrontInput.value = "";
+    billBackInput.value = "";
+    clearFrontPreview();
+    clearBackPreview();
+    setBackSlotEnabled(true);
     document.getElementById("lbl-commercial").classList.remove("checked");
     document.getElementById("lbl-industrial").classList.remove("checked");
     dashboardSection.style.display = "none";

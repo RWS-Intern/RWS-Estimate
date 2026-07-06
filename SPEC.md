@@ -110,8 +110,17 @@ it, per `extraction_hardening.md`.
 **Client always ends up sending one or more images** (`index.html` /
 `assets/js/app.js`):
 
-- Photo upload (JPG/PNG): downscaled so the long edge is ~1600px, re-encoded
-  as JPEG ~0.85 quality. A single image.
+- Photo upload (JPG/PNG): two upload slots in `index.html` — "Bill – Front"
+  (required) and "Bill – Back" (optional, for bills whose billing
+  details/ToD/history spill onto a second photographed page). Each is
+  independently downscaled so the long edge is ~1600px, re-encoded as JPEG
+  ~0.85 quality, with its own client-side type/size validation and a small
+  preview thumbnail + clear button (`assets/js/app.js`:
+  `showFrontPreview()`/`showBackPreview()`/`clearFrontPreview()`/
+  `clearBackPreview()`). Selecting a PDF in the front slot hides and clears
+  the back slot (`setBackSlotEnabled()`) — a PDF already covers every page,
+  a second loose photo makes no sense alongside it. One or two images
+  result, front first.
 - PDF upload: **every page** rendered client-side to its own high-DPI image
   (~200–220dpi, capped at `PDF_MAX_PAGES = 8`) via `pdf.js` loaded from a
   CDN, rendered sequentially to bound peak memory on phones. MSEDCL bills
@@ -130,10 +139,11 @@ it, per `extraction_hardening.md`.
 
 **Upload payload** (`multipart/form-data` to `api/extract.php`):
 
-- `bill_image[]` — always present, one or more. The array field name means
-  PHP always gives `$_FILES['bill_image']` the parallel-arrays shape (even
-  for a single photo), which `collect_uploaded_images()` normalises into a
-  flat list.
+- `bill_image[]` — always present, one or more (one for a single photo or
+  front-only upload, two for a front+back photo pair, or one per PDF page).
+  The array field name means PHP always gives `$_FILES['bill_image']` the
+  parallel-arrays shape (even for a single photo), which
+  `collect_uploaded_images()` normalises into a flat list.
 - `bill_pdf` — present only when the original upload was a PDF. The
   *original, unmodified* file, so `smalot/pdfparser` can attempt the free
   text-layer path.
@@ -507,7 +517,7 @@ directly either way.
 
 **Data flow — one flatten step, two presentations:**
 - `loadLeads()` fetches `company_name, mobile, category, stage, computed,
-  bill_path, report_path, created_at` for every row, most-recent-first
+  bill_path, bill_path_back, report_path, created_at` for every row, most-recent-first
   (`.order('created_at', {ascending: false})`), fired once, lazily, the
   first time the Leads tab is clicked (not on every click — `leadsLoadedOnce`
   guards against re-fetching every time the admin switches tabs; reload the
@@ -537,10 +547,13 @@ directly either way.
   (`.tbl-scroll`'s own rule right-aligns everything, tuned for an
   all-numeric table) with `.num` marking the five numeric columns back to
   right-aligned.
-- **Bill file / Report file are live "Download" buttons** (`.leads-dl-btn`,
-  styled as a plain underlined link since it sits inline in a table cell),
-  shown when `bill_path`/`report_path` is present, "—" when it's `null`.
-  Clicking one calls `downloadSignedFile(bucket, path, btn)` — see
+- **Bill file (front) / Bill file (back) / Report file are live "Download"
+  buttons** (`.leads-dl-btn`, styled as a plain underlined link since it
+  sits inline in a table cell), shown when `bill_path`/`bill_path_back`/
+  `report_path` is present, "—" when it's `null` (`bill_path_back` is
+  `null` for every submission that uploaded a PDF or a front-only photo —
+  see "Bill upload: front/back photo slots" above). Clicking one calls
+  `downloadSignedFile(bucket, path, btn)` — see
   "Signed downloads" below for how that actually reaches a private file
   without exposing the service role key or making the buckets public.
 
@@ -667,11 +680,16 @@ wiring" above — unrelated to persisting submissions.
      Name" per this spec's Pipeline section; the visible label/id hasn't
      been renamed (still a follow-up, see Owner notes).
 2. **`api/upload_bill.php`** — called right after extraction succeeds
-   (`json.success === true`), with the ORIGINAL file the customer picked
-   (`rawFile` — not the downscaled photo or the per-page PDF renders sent to
-   `api/extract.php`). Uploads to the private `bills` bucket at
-   `{submission_id}/{sanitised_filename}` via the Storage REST API, then
-   `PATCH`es the row's `bill_path` to `bills/{submission_id}/{filename}`.
+   (`json.success === true`), with the ORIGINAL file(s) the customer picked
+   (`frontFile`/`backFile` — not the downscaled photos or the per-page PDF
+   renders sent to `api/extract.php`). `bill_file_front` is required;
+   `bill_file_back` is only sent when the customer uploaded a loose
+   back-of-bill photo (never for a PDF upload — the front slot going PDF
+   hides/clears the back slot client-side, see "Bill upload: front/back
+   photo slots" below). Each is uploaded to the private `bills` bucket at
+   `{submission_id}/{submission_id}_front.{ext}` /
+   `{submission_id}_back.{ext}` via the Storage REST API, then `PATCH`es the
+   row's `bill_path` (front/only page) and, if present, `bill_path_back`.
 3. **`api/complete.php`** — called after `RiteFormulation.derive()` +
    `RiteEngine.compute()` + `renderDashboard()` have already run and the
    dashboard is on screen (`confirmBtn`'s click handler, after
@@ -963,8 +981,9 @@ success" report ever comes up for either of them.
                            validation rules from extraction_hardening.md)
 /api/lead.php             inserts a 'submissions' row on entry-form submit
 /api/complete.php         patches that row on confirm (extracted + computed)
-/api/upload_bill.php      uploads the original bill file to Storage, patches
-                           bill_path
+/api/upload_bill.php      uploads the original bill file(s) to Storage
+                           (front required, back optional), patches
+                           bill_path / bill_path_back
 /api/upload_report.php    uploads the generated PDF to Storage, patches
                            report_path
 /api/get_config.php       reads the app_config row (service role key)
@@ -1048,12 +1067,12 @@ success" report ever comes up for either of them.
   the earlier-noted follow-up (renaming that field/label to "Company Name"
   and heading the dashboard "Prepared for {Company Name}") still hasn't been
   done; this task only wired the data flow, not that UI text.
-- Bill files land in Storage at `{submission_id}/{filename}` inside the
-  `bills` bucket, with special characters stripped from the filename
-  (`preg_replace('/[^A-Za-z0-9._-]/', '_', ...)`) — two bills with the same
-  original filename from the same customer overwrite each other in Storage
-  (`x-upsert: true`) since each customer only ever has one bill in this
-  flow; this is intentional, not a bug.
+- Bill files land in Storage at `{submission_id}/{submission_id}_front.{ext}`
+  and, if a back photo was sent, `{submission_id}/{submission_id}_back.{ext}`
+  inside the `bills` bucket — a fixed, suffixed filename per slot rather
+  than the customer's original filename, so a re-upload for the same
+  submission id always overwrites the same object (`x-upsert: true`) instead
+  of accumulating stale files; this is intentional, not a bug.
 - This task's Supabase code (REST inserts/patches, Storage upload) was also
   only reviewed by reading, not run against a live Supabase project — the
   request shapes match Supabase's documented PostgREST/Storage REST APIs,
@@ -1268,3 +1287,28 @@ success" report ever comes up for either of them.
   writing, but worth a quick `docker run --rm php:8.2-apache cat
   /etc/apache2/ports.conf` check if a future base-image bump ever changes
   that file's contents.
+- **Two-image bill upload (front/back, most recent task)**: the single
+  `in-bill` file input became two slots (`in-bill-front` required,
+  `in-bill-back` optional, image-only) — see "Bill upload: front/back photo
+  slots" above. Schema change: rather than a `jsonb` array of paths, a
+  single new nullable column `bill_path_back text` was added to
+  `submissions` (`alter table submissions add column if not exists
+  bill_path_back text;` in `backend_and_admin.md`, same pattern as
+  `report_path`'s earlier addition), leaving the existing `bill_path` column
+  as the front/only-page path unchanged. This was the smaller, lower-risk
+  option of the two offered: it touches nothing that already reads
+  `bill_path` (admin Leads columns, `sign_url.php`'s generic bucket/path
+  validation, the RLS policy), it needed no migration of existing rows (all
+  simply get `bill_path_back = null`), and it avoids restructuring a
+  well-established scalar-column shape into a `jsonb` array for what is, at
+  most, two files. The PDF path is completely untouched — `bill_pdf` /
+  `bill_image[]` semantics, `MAX_IMAGE_COUNT`, and the free text-layer
+  fast-path in `api/extract.php` are all exactly as before. As with
+  everything else in this sandbox, this was built and reviewed by reading,
+  not by clicking through a real upload in a browser or running it against
+  a live Supabase project — before trusting it in front of a customer,
+  apply the `bill_path_back` column migration, then manually test: (a) a
+  front-only image upload, (b) a front+back image upload, (c) a PDF upload
+  (confirm the back slot actually hides/clears and no `bill_file_back` is
+  sent), and confirm the admin Leads tab's new "Bill file (back)" column and
+  its Excel export column both behave correctly when the value is `null`.

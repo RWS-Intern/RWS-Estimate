@@ -300,7 +300,8 @@
     { key: "irr", label: "IRR (%)", num: true },
     { key: "payback_years", label: "Payback (yrs)", num: true },
     { key: "net_capital", label: "Net capital (₹)", num: true },
-    { key: "bill_path", label: "Bill file", file: "bills" },
+    { key: "bill_path", label: "Bill file (front)", file: "bills" },
+    { key: "bill_path_back", label: "Bill file (back)", file: "bills" },
     { key: "report_path", label: "Report file", file: "reports" }
   ];
 
@@ -346,6 +347,7 @@
       payback_years: numOrNull(computed.payback_years),
       net_capital: numOrNull(computed.ex_gst_capital),
       bill_path: row.bill_path || null,
+      bill_path_back: row.bill_path_back || null,
       report_path: row.report_path || null
     };
   }
@@ -464,7 +466,7 @@
     leadsBody.appendChild(loadingRow);
 
     return sb.from("submissions")
-      .select("company_name, mobile, category, stage, computed, bill_path, report_path, created_at")
+      .select("company_name, mobile, category, stage, computed, bill_path, bill_path_back, report_path, created_at")
       .order("created_at", { ascending: false })
       .then(function (res) {
         if (res.error) {
@@ -512,7 +514,7 @@
         lead.date ? lead.date.toLocaleString("en-IN") : "",
         lead.company, lead.mobile, lead.category, lead.stage,
         lead.offered_kwp, lead.effective_tariff, lead.irr, lead.payback_years, lead.net_capital,
-        filenameFromPath(lead.bill_path), filenameFromPath(lead.report_path)
+        filenameFromPath(lead.bill_path), filenameFromPath(lead.bill_path_back), filenameFromPath(lead.report_path)
       ]);
     });
 

@@ -1,10 +1,18 @@
 <?php
 /**
  * api/upload_bill.php — called right after a successful extraction (SPEC.md
- * "Persist to Supabase"). Uploads the ORIGINAL bill file (the untouched
+ * "Persist to Supabase"). Uploads the ORIGINAL bill file(s) (the untouched
  * photo/PDF the customer picked — not the downscaled/rendered images sent
  * to api/extract.php) to the private 'bills' storage bucket, then stamps
- * the submission row's bill_path.
+ * the submission row's bill_path (front/only page) and, if a back-of-bill
+ * photo was also sent, bill_path_back.
+ *
+ * bill_file_front is required; bill_file_back is optional (only present
+ * when the customer uploaded two loose photos rather than a PDF — see
+ * app.js's setBackSlotEnabled()). Both are stored under the same
+ * submission id with suffixed filenames, e.g. {id}/{id}_front.jpg and
+ * {id}/{id}_back.jpg, so a submission's two pages sort together in the
+ * bucket and never collide with each other's names.
  *
  * Fire-and-forget from the client's point of view: the confirm screen is
  * already showing by the time this runs. Any failure is logged server-side
@@ -43,43 +51,59 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 $id = isset($_POST['id']) ? trim($_POST['id']) : '';
-if ($id === '' || !isset($_FILES['bill_file']) || $_FILES['bill_file']['error'] !== UPLOAD_ERR_OK) {
-    respond(array('success' => false, 'error' => 'Missing id or bill_file.'));
+if ($id === '' || !isset($_FILES['bill_file_front']) || $_FILES['bill_file_front']['error'] !== UPLOAD_ERR_OK) {
+    respond(array('success' => false, 'error' => 'Missing id or bill_file_front.'));
 }
 
-$file = $_FILES['bill_file'];
-if ($file['size'] <= 0 || $file['size'] > MAX_BILL_BYTES) {
-    respond(array('success' => false, 'error' => 'File too large.'));
+/** Detects the file's MIME type and uploads it to the 'bills' bucket under
+ *  {id}/{id}_{suffix}.{ext}. Returns the bucket-prefixed object path on
+ *  success, or null on any failure (bad upload, storage error). */
+function upload_bill_page($file, $id, $suffix) {
+    if ($file['size'] <= 0 || $file['size'] > MAX_BILL_BYTES) {
+        return null;
+    }
+    $bytes = file_get_contents($file['tmp_name']);
+    if ($bytes === false) {
+        return null;
+    }
+
+    $mime = null;
+    if (function_exists('finfo_open')) {
+        $finfo = finfo_open(FILEINFO_MIME_TYPE);
+        if ($finfo) {
+            $mime = finfo_file($finfo, $file['tmp_name']);
+            // No finfo_close() — finfo is a normal object in PHP 8, garbage
+            // collected when $finfo goes out of scope; closing it explicitly is
+            // deprecated as of PHP 8.5.
+        }
+    }
+    if (!$mime) $mime = 'application/octet-stream';
+
+    $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+    if ($ext === '' || $ext === null) $ext = 'bin';
+    $ext = preg_replace('/[^a-z0-9]/', '', $ext);
+    $safeName = $id . '_' . $suffix . '.' . $ext;
+    $objectPath = $id . '/' . $safeName; // within the 'bills' bucket
+
+    $uploaded = supabase_storage_upload('bills', $objectPath, $bytes, $mime);
+    return $uploaded ? ('bills/' . $objectPath) : null;
 }
 
-$bytes = file_get_contents($file['tmp_name']);
-if ($bytes === false) {
-    respond(array('success' => false, 'error' => 'Could not read the uploaded file.'));
+$frontPath = upload_bill_page($_FILES['bill_file_front'], $id, 'front');
+if ($frontPath === null) {
+    respond(array('success' => false, 'error' => 'Could not upload the front page.'));
 }
 
-$mime = null;
-if (function_exists('finfo_open')) {
-    $finfo = finfo_open(FILEINFO_MIME_TYPE);
-    if ($finfo) {
-        $mime = finfo_file($finfo, $file['tmp_name']);
-        // No finfo_close() — finfo is a normal object in PHP 8, garbage
-        // collected when $finfo goes out of scope; closing it explicitly is
-        // deprecated as of PHP 8.5.
+$patch = array('bill_path' => $frontPath);
+
+if (isset($_FILES['bill_file_back']) && $_FILES['bill_file_back']['error'] === UPLOAD_ERR_OK) {
+    $backPath = upload_bill_page($_FILES['bill_file_back'], $id, 'back');
+    if ($backPath !== null) {
+        $patch['bill_path_back'] = $backPath;
     }
 }
-if (!$mime) $mime = 'application/octet-stream';
 
-$safeName = preg_replace('/[^A-Za-z0-9._-]/', '_', $file['name']);
-if ($safeName === '' || $safeName === null) $safeName = 'bill';
-$objectPath = $id . '/' . $safeName; // within the 'bills' bucket
-
-$uploaded = supabase_storage_upload('bills', $objectPath, $bytes, $mime);
-if (!$uploaded) {
-    respond(array('success' => false));
-}
-
-$rows = supabase_rest('PATCH', 'submissions?id=eq.' . rawurlencode($id), array(
-    'bill_path' => 'bills/' . $objectPath,
-), array('Prefer: return=representation'));
+$rows = supabase_rest('PATCH', 'submissions?id=eq.' . rawurlencode($id), $patch,
+    array('Prefer: return=representation'));
 
 respond(array('success' => is_array($rows)));

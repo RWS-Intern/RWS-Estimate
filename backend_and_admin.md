@@ -68,7 +68,8 @@ create table if not exists submissions (
   company_name text,
   mobile text,
   category text,                 -- 'Commercial' | 'Industrial'
-  bill_path text,                -- object path in the 'bills' storage bucket
+  bill_path text,                -- object path in the 'bills' storage bucket (front/only page)
+  bill_path_back text,           -- object path of the optional back-of-bill photo (null if not sent)
   report_path text,              -- object path in the 'reports' storage bucket (branded PDF)
   extracted jsonb,               -- confirmed extraction JSON
   computed jsonb,                -- offered_kwp, effective_tariff, irr, payback, npv, lcoe, ...
@@ -79,6 +80,10 @@ create table if not exists submissions (
 
 -- If submissions already existed before report_path was added:
 -- alter table submissions add column if not exists report_path text;
+
+-- If submissions already existed before bill_path_back was added (two-image
+-- bill upload — front required, back optional):
+-- alter table submissions add column if not exists bill_path_back text;
 
 -- === RLS ===
 alter table app_config enable row level security;

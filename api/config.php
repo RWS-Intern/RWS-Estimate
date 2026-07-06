@@ -31,3 +31,4 @@ define('ANTHROPIC_MODEL', getenv('ANTHROPIC_MODEL') ?: 'claude-opus-4-8');
 // dashboard > Project Settings > API.
 define('SUPABASE_URL', getenv('SUPABASE_URL') ?: 'REPLACE_ME_SUPABASE_URL');
 define('SUPABASE_SERVICE_ROLE_KEY', getenv('SUPABASE_SERVICE_ROLE_KEY') ?: 'REPLACE_ME_SUPABASE_SERVICE_ROLE_KEY');
+
