@@ -36,6 +36,35 @@ loan_rate_default=9, tenure_months_default=60, fd_rate_default=7,
 bond_rate=0.08, savings_rate=0.035, equity_rate=0.12
 ```
 
+**Commercial formulation constants** (added alongside the commercial tariff
+category — see SPEC.md's "Commercial formulation" section):
+```
+solar_hour_share_pct=75, gst_pct_commercial=8.9, dep_default_commercial=false,
+commercial_rate_table=[{"kwp":0,"rate":58000},{"kwp":10,"rate":54000},
+  {"kwp":25,"rate":52000},{"kwp":50,"rate":50000},{"kwp":100,"rate":48000}]
+```
+If `app_config` already has a row (it almost certainly does — this is a
+**single-row JSONB blob**, `id=1`, not a per-key table, so these are NOT new
+rows to insert), merge the four new keys into the existing row instead:
+```sql
+update app_config
+set config = config || '{
+  "solar_hour_share_pct": 75,
+  "gst_pct_commercial": 8.9,
+  "dep_default_commercial": false,
+  "commercial_rate_table": [
+    {"kwp": 0, "rate": 58000}, {"kwp": 10, "rate": 54000},
+    {"kwp": 25, "rate": 52000}, {"kwp": 50, "rate": 50000},
+    {"kwp": 100, "rate": 48000}
+  ]
+}'::jsonb,
+    updated_at = now()
+where id = 1;
+```
+Until this runs, `assets/config-defaults.js`'s `DEFAULTS` fallback covers the
+same four values in code — a commercial estimate still works, it just can't
+be tuned from `/admin/` for that customer until the row is updated.
+
 ---
 
 ## 2. Supabase SQL (run in the SQL editor)

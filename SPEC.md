@@ -58,13 +58,27 @@ wiring" and "Admin page" below.
       "t17_24": { "units": 0, "rate": 0 }
     }
   },
+  "commercial": {
+    "current_month_units": 0,
+    "energy_rate": 0,
+    "wheeling": 0,
+    "fac": 0,
+    "electricity_duty_pct": 0,
+    "tax_on_sale": 0,
+    "tod_rebate_pct": 0,
+    "grid_support_charge": 0
+  },
   "billing_history_units": [0]
 }
 ```
 
 Notes:
 
-- `tariff_category`: `"Industrial"` or `"Commercial"`.
+- `tariff_category`: `"Industrial"` or `"Commercial"` — decides which of
+  `current_month` (industrial) or `commercial` (commercial) is actually
+  populated; the other sits at its blank/null shape and is ignored. Both
+  keys are always present so downstream code never has to special-case a
+  missing key, only null values within whichever one is live.
 - `tariff_code`: e.g. `"LT-V B II"`.
 - `current_month.total_units`: e.g. `5703`.
 - `current_month.energy_rate`: base energy Rs/unit, e.g. `7.66`.
@@ -74,8 +88,24 @@ Notes:
 - `current_month.tax_on_sale`: Rs/unit, e.g. `0.2894`.
 - `tod.t09_17.rate` can be negative — a daytime rebate, e.g. `-1.149`.
 - `tod.t17_24.rate` e.g. `1.915`.
+- `commercial.current_month_units`: e.g. `4000` — commercial's total-units
+  equivalent; no ToD-slot units table.
+- `commercial.energy_rate`/`wheeling`/`fac`/`tax_on_sale`/`grid_support_charge`:
+  all Rs/unit, e.g. `8.51`/`1.60`/`0.65`/`0.279`/`1.96`. Unlike industrial,
+  `grid_support_charge` is READ OFF THE BILL for commercial, not a fixed
+  `gsc` config constant. `wheeling` is the bill's "Wheeling Charges" line,
+  already Rs/unit as printed — used directly, no unit conversion. (A field
+  named `demand_charge` briefly existed here for the same bill line, under
+  the wrong label and the wrong unit treatment — real-bill testing found it
+  was actually wheeling, already Rs/unit, not a Rs/month total needing
+  division. Removed; `wheeling` is now the only field for this line — see
+  "Commercial formulation" below for the correction.)
+- `commercial.electricity_duty_pct`/`tod_rebate_pct`: PERCENTAGES (e.g. `21`
+  meaning 21%, `15` meaning 15%) — commercial bills print these as a rate
+  applied to the tariff, not as their own Rs/unit line, unlike industrial's
+  per-unit `electricity_duty` and per-slot ToD rates.
 - `billing_history_units`: most recent up to 12 months of units, most-recent
-  FIRST.
+  FIRST — same field, shared by both categories.
 - Any field that could not be read may be `null` — the confirm screen is the
   backstop, never invent a number.
 
@@ -262,7 +292,11 @@ tariff_esc=0.03, gsc=1.96, daytime_window="06-17", years=25,
 dep_default=true, tax_default=25.18, loan_default=false, dp_default=20,
 loan_rate_default=9, tenure_months_default=60, fd_rate_default=7,
 // comparison rates on the "vs deposit/bond" chart:
-bond_rate=0.08, savings_rate=0.035, equity_rate=0.12
+bond_rate=0.08, savings_rate=0.035, equity_rate=0.12,
+// commercial-only formulation constants (see "Commercial formulation" below):
+solar_hour_share_pct=75, gst_pct_commercial=8.9, dep_default_commercial=false,
+commercial_rate_table=[{"kwp":0,"rate":58000},{"kwp":10,"rate":54000},
+  {"kwp":25,"rate":52000},{"kwp":50,"rate":50000},{"kwp":100,"rate":48000}]
 ```
 
 `years` (the engine's fixed 25-year horizon) was added to this list in the
@@ -347,6 +381,121 @@ screen shows the thrown message verbatim: *"Your bill values look
 inconsistent, please recheck total units and TOD slots."* and does NOT
 render the dashboard.
 
+## Commercial formulation (implemented in `assets/formulation.js`)
+
+A second, independent derivation for `tariff_category === "Commercial"` —
+`deriveCommercial()`, dispatched from the same `RiteFormulation.derive()`
+entry point industrial always used (`deriveIndustrial()` now, byte-for-byte
+the original `derive()` body — see that function's own comment). Commercial
+MSEDCL bills itemise wheeling/duty/ToD-rebate/GSC as their own lines instead
+of a per-slot ToD table, and size against an assumed solar-hour-share of
+usage (there's no measured daytime fraction to read off a commercial meter)
+capped by sanctioned load rather than rounded up unconditionally.
+
+```
+// wheeling is the bill's "Wheeling Charges" line, ALREADY Rs/unit as
+// printed — used directly. (An earlier version of this formula had a
+// separate DEMAND_PER_UNIT = commercial.demand_charge / current_month_units
+// term, added into both DUTY_PER_UNIT's base and EFFECTIVE_TARIFF — real-
+// bill testing found "demand_charge" was actually the SAME wheeling line
+// under the wrong label, so that field double-counted wheeling AND divided
+// an already-per-unit figure by units again. Removed; wheeling is the only
+// term for this line now.)
+DUTY_PER_UNIT       = (commercial.electricity_duty_pct / 100) *
+                        (energy_rate + wheeling + fac)
+TOD_REBATE_PER_UNIT = (commercial.tod_rebate_pct / 100) * energy_rate
+EFFECTIVE_TARIFF    = energy_rate + wheeling + fac + DUTY_PER_UNIT
+                        + tax_on_sale - TOD_REBATE_PER_UNIT - grid_support_charge
+
+  // Worked example (the reference bill used to verify this formulation):
+  // duty_per_unit = 0.21*(8.51+1.60+0.65) = 2.2596
+  // tod_rebate_per_unit = 0.15*8.51 = 1.2765
+  // effective_tariff = 8.51+1.60+0.65+2.2596+0.279-1.2765-1.96 = 10.0621
+  //
+  // (Previous version of this doc had effective_tariff = 10.22545, which
+  // included the erroneous demand_per_unit component above — delta from
+  // removing it: -0.16335 Rs/unit. Sizing/pricing below are UNCHANGED by
+  // this fix — they don't depend on effective_tariff.)
+
+ANNUAL_UNITS       = sum(billing_history_units)          // same as industrial
+REQUIRED_KWP_EXACT = (ANNUAL_UNITS * SOLAR_HOUR_SHARE_PCT/100) / (GEN_PER_KWP_DAY * DAYS)
+
+  // e.g. 32157 * 0.75 / (4*365) = 16.519 kWp
+
+// MIN(required, sanctioned) decides which constraint binds. Only when
+// consumption is the binding constraint do we round UP like industrial —
+// a sanctioned-load cap is used exactly as printed (no ceiling: a fixed
+// grid connection limit isn't something you round up).
+SIZED_BY_SANCTIONED_LOAD = sanctioned_load_kw <= REQUIRED_KWP_EXACT
+OFFERED_KWP = SIZED_BY_SANCTIONED_LOAD ? sanctioned_load_kw : ceil(REQUIRED_KWP_EXACT)
+
+  // e.g. sanctioned 7.49 <= required 16.519 -> sanctioned binds -> 7.49 kWp
+  // (kept as printed, not rounded, since it's a grid connection limit)
+
+RATE_PER_KWP = floor-lookup(OFFERED_KWP, COMMERCIAL_RATE_TABLE)  // highest
+                // table threshold <= OFFERED_KWP wins; see config below
+
+  // e.g. 7.49 kWp -> the "0 kWp" bracket -> 58000 Rs/kWp
+
+GROSS_COST       = OFFERED_KWP * RATE_PER_KWP
+GST_AMOUNT       = GROSS_COST * (GST_PCT_COMMERCIAL / 100)
+NET_COST_INC_GST = GROSS_COST + GST_AMOUNT
+EX_GST_CAPITAL   = GROSS_COST
+
+  // e.g. 7.49*58000 = 434420; *1.089 = 473083.38
+```
+
+**Config additions** (seed defaults in `assets/config-defaults.js`, admin-
+editable under the "Commercial" group — see "Configuration" above):
+- `solar_hour_share_pct` (default `75`) — replaces industrial's measured
+  `daytime_fraction`.
+- `gst_pct_commercial` (default `8.9`) — a PERCENT NUMBER like `tax_default`,
+  not a `0-1` fraction like industrial's `gst_rate`.
+- `commercial_rate_table` — a JSON array of `{kwp, rate}` floor-lookup
+  thresholds (small commercial systems cost more per kWp than large
+  industrial ones, hence a table instead of one flat `rate_per_kwp`).
+- `dep_default_commercial` (default `false`) — the depreciation-toggle
+  starting position for a commercial customer's dashboard, separate from
+  industrial's `dep_default` (`true`). See "Downstream engine" below for why
+  this exists.
+
+**Downstream engine (`assets/engine.js`) — parameterized, not duplicated:**
+`compute()`'s only two category-dependent reads were `config.rate_per_kwp`/
+`config.gst_rate` (used to independently re-derive gross/net cost from
+`lock.size`, since `compute()` never took formulation's own gross/net cost as
+an input). Both now prefer `lock.ratePerKwp`/`lock.gstRate` when the caller
+supplies them, falling back to the global config values otherwise —
+`deriveIndustrial()` sets those two `lock` fields to exactly
+`config.rate_per_kwp`/`config.gst_rate`, so industrial's computed numbers are
+bit-identical to before this change; `deriveCommercial()` sets them to the
+looked-up table rate and `gst_pct_commercial/100`. Every other downstream
+constant (AMC, spares, degradation, depreciation rate/years, tariff
+escalation, discount rate, surplus interest) is genuinely shared between
+categories — no "commercial equivalent" needed for any of those.
+
+**`dep_default_commercial` exists because of one verification finding:**
+sizing/pricing (`effective_tariff`, `offered_kwp`, `rate_per_kwp`,
+`gross_cost`, `net_cost_inc_gst`) all matched the reference bill's expected
+values EXACTLY once the formulas above were implemented (this was BEFORE
+the wheeling/demand_charge fix below — `effective_tariff` matched an
+expected value that, per that fix, included an erroneous demand component;
+see that section for the corrected `10.0621`). IRR/payback did NOT match,
+though — reusing industrial's scenario defaults verbatim (`dep_default` ON,
+`tax_default` 25.18%) gave IRR ≈44.4%/payback ≈3.32yr against an expected
+≈34.25%/≈4.275yr (4yr 3.3mo). Turning depreciation OFF by default for
+commercial (tax rate then becomes irrelevant, since no depreciation benefit
+is claimed) closed almost all of the gap: ≈34.86%/≈4.14yr, using the
+(un-corrected) `10.22545` tariff. **Re-run after the wheeling fix, with the
+corrected `10.0621` tariff, the same `dep_default_commercial=false`
+assumption lands even closer: IRR ≈34.13%/payback ≈4.21yr** — within
+≈0.1 percentage points of IRR and ≈1 month of payback against the
+≈34.25%/≈4.275yr target. Still not confirmed as an exact match (no exact
+target was ever given, only "≈" figures), but close enough that
+`dep_default_commercial=false` looks like the right call, and the wheeling
+fix happened to close most of the remaining gap the original investigation
+couldn't explain. See Owner notes for the recommended next step if
+exact parity matters.
+
 ## Dashboard implementation
 
 The 25-year engine, chart rendering, and metric/table wiring were lifted out
@@ -363,9 +512,13 @@ separate by responsibility:
   the Formulas section above. Pure function, no DOM.
 - **`assets/engine.js`** — `RiteEngine.compute(lock, config, scenario)` plus
   `irr`/`npv`/`pmt`/`inr`/`inrShort`. `lock` is `{size: offered_kwp, gen:
-  gen_per_kwp_day, flatRate: effective_tariff}` — the three per-customer
-  values that used to be estimate.html's hardcoded `LOCK` block, now derived
-  by formulation.js instead. `scenario` is the slider state (`{dep, tax,
+  gen_per_kwp_day, flatRate: effective_tariff, ratePerKwp, gstRate}` — the
+  three per-customer values that used to be estimate.html's hardcoded `LOCK`
+  block, now derived by formulation.js instead, plus `ratePerKwp`/`gstRate`
+  (added for the commercial formulation — see that section — so `compute()`
+  can price a category whose rate isn't a flat global constant; industrial
+  sets these to exactly `config.rate_per_kwp`/`config.gst_rate`, so its
+  numbers are unaffected). `scenario` is the slider state (`{dep, tax,
   loan, dp, rate, ten, fd}` — `S` in the original demo). Two fields from the
   original `compute()` were dropped as genuinely dead code (verified nothing
   reads them): `co2PerUnit`/`ppaEsc`/`LOCK.ppa` (fed an unused
@@ -1312,3 +1465,128 @@ success" report ever comes up for either of them.
   (confirm the back slot actually hides/clears and no `bill_file_back` is
   sent), and confirm the admin Leads tab's new "Bill file (back)" column and
   its Excel export column both behave correctly when the value is `null`.
+- **Commercial formulation (most recent task)**: added a second, fully
+  independent tariff path — `deriveCommercial()` in `assets/formulation.js`,
+  its own extraction schema/prompt/validator in `api/extract.php`
+  (`call_commercial_vision_api*()`, `commercial_vision_*()`,
+  `validate_commercial_extraction()`), its own confirm-screen field builder
+  in `assets/js/app.js` (`buildCommercialRateFields()`), and its own
+  narrative prose in both `app.js` and `report.js` (`renderCommercialNarrative()`
+  / `narrativeCards()`'s commercial branch). Industrial's own functions were
+  renamed (`derive()` -> `deriveIndustrial()`, `renderNarrative()` ->
+  `renderIndustrialNarrative()`) but their BODIES are untouched — verified by
+  reading, not by a diff tool, so worth a `git diff` gut-check on
+  `deriveIndustrial()`/`renderIndustrialNarrative()` specifically against the
+  pre-this-task version if that matters to you.
+  - **Deliberately duplicated, not shared, despite this file's usual
+    "parameterize, don't duplicate" preference**: `call_commercial_vision_api_attempt()`
+    in `api/extract.php` re-implements `call_vision_api_attempt()`'s curl
+    mechanics rather than parameterizing the existing function with a
+    prompt/schema/tool-name argument. The one exception was `engine.js`'s
+    `compute()`, which genuinely had to change (see "Commercial formulation"
+    section's "Downstream engine" note) — everywhere else, duplicating ~50
+    lines of already-working curl code seemed like a better trade than
+    touching a function every existing industrial customer's extraction
+    already runs through.
+  - **No free text-layer fast path for commercial** — `api/extract.php`'s
+    commercial branch always calls vision, never attempts
+    `smalot/pdfparser` + regex parsing the way industrial's PDF uploads can.
+    No commercial bill layout was available to build/verify a parser
+    against (same caveat industrial's own fast path already carries, just
+    with zero attempt made here instead of an unverified one). This costs
+    more per commercial PDF upload than it strictly needs to, but a wrong
+    guess at a commercial bill's text layout seemed worse than a small,
+    known cost increase.
+  - **Verified exactly**: `effective_tariff` (10.22545), `offered_kwp`
+    (7.49, sanctioned-load-capped, kept as a decimal not rounded),
+    `rate_per_kwp` (58000, from the floor-lookup table), `gross_cost`
+    (434420), `net_cost_inc_gst` (473083.38) — all matched the reference
+    bill's expected values exactly in the Node test harness (see below).
+  - **NOT verified exactly — closest match found**: IRR/payback. See the
+    "Commercial formulation" section's `dep_default_commercial` note for the
+    full account — turning commercial's depreciation-toggle default OFF
+    closes nearly all of a ~10-point IRR gap, landing at ≈34.86%/≈4.14yr
+    against an expected ≈34.25%/≈4.275yr (both figures were given with "≈"
+    in the task, so this may already be within the reference workbook's own
+    rounding — but it was not possible to confirm that here). **If exact
+    parity matters**, the most likely remaining lever is a downstream
+    constant this task's brief called "commercial equivalents of existing
+    tunables" without naming one specifically (a different AMC rate, spares
+    rate, or degradation curve for small commercial systems) — none of
+    which could be reverse-engineered from a single worked example with only
+    two free knobs (IRR, payback) to fit against. Provide either the
+    reference workbook itself or a second worked example (different size/
+    tariff) and this can be pinned down exactly.
+  - **Test harness**: `C:\Users\asus\AppData\Local\Temp\claude\d--RiteSolar-estimate\754e1555-0394-4ea7-bc75-9964bf4d4c0d\scratchpad\test-commercial.js`
+    (session scratchpad, not part of the repo) — a standalone Node script
+    that `require()`s the real `assets/formulation.js`/`assets/engine.js`
+    (shimming the `window` global they attach to) and runs the reference
+    bill's numbers through both, asserting the exact-match figures above and
+    reporting the IRR/payback gap. Not committed to the repo since it's a
+    one-off verification script, not a maintained test suite — copy it
+    somewhere durable if you want to re-run it after a future change to
+    either file.
+  - Admin UI: a new "Commercial" `FIELD_GROUPS` entry in `admin/admin.js`,
+    plus a new `type: "json"` field kind (a `<textarea>`, parsed/
+    stringified as JSON) added to `buildField()`/`populateForm()`/
+    `validateAndCollect()` — purely additive, the existing `number`/
+    `fraction`/`bool`/`select` branches are untouched. This was reviewed by
+    reading only; open `/admin/` and confirm the JSON textarea actually
+    populates, validates malformed JSON with a clear error, and saves/
+    reloads the `commercial_rate_table` correctly before relying on it.
+  - The `update app_config set config = config || '...'::jsonb where id=1;`
+    merge statement in `backend_and_admin.md` must be run once before the
+    admin page's "Commercial" fields have real values to show (they'll
+    render blank/`NaN` otherwise, same as any other config key added after
+    a project's `app_config` row was first seeded).
+- **Wheeling/demand_charge correction (most recent task)**: real-bill
+  testing found the field captured as `commercial.demand_charge` was
+  mislabelled — it's actually the bill's "Wheeling Charges" line, which the
+  commercial formulation already had a SEPARATE `wheeling` input for. Both
+  were being summed into `effective_tariff` (a genuine double-count), and
+  `demand_charge` was additionally divided by `current_month_units` even
+  though the value is already Rs/unit, not a Rs/month total. `demand_charge`
+  is now removed entirely (extraction schema/prompt/validator in
+  `api/extract.php`, confirm-screen field in `app.js`, `deriveCommercial()`
+  in `formulation.js`, narrative prose in `app.js`/`report.js`) — `wheeling`
+  is the only field for this line, used directly (no ÷ units). Industrial's
+  `demand_charge_per_unit` is a real, separate, correctly-Rs/unit field and
+  was NOT touched anywhere.
+  - **Effective tariff changed**: `10.22545` -> `10.0621` for the reference
+    bill (delta `-0.16335`) — see "Commercial formulation" above for the
+    corrected formula and worked example. Sizing/pricing (`offered_kwp`,
+    `rate_per_kwp`, `gross_cost`, `net_cost_inc_gst`) are unaffected — they
+    never depended on this field.
+  - **Legacy read-side fallback**: `deriveCommercial()` now does
+    `wheeling = !isMissing(c.wheeling) ? c.wheeling : c.demand_charge` before
+    validating, so an old-shaped `commercial` object (has `demand_charge`,
+    no `wheeling`) still produces a number instead of throwing. This is
+    "graceful", not "numerically correct" — a legacy row's `demand_charge`
+    was captured as a Rs/month total under the wrong label, so feeding it
+    in raw (as the fallback does) does NOT retroactively fix historical
+    data, it just avoids a hard failure. Checked whether this matters in
+    practice: the admin Leads view's query never selects `submissions
+    .extracted` at all (only the flattened `computed` summary), and nothing
+    else in this codebase re-feeds an archived `extracted` row back into
+    `deriveCommercial()` — so as of this task, no live code path actually
+    exercises this fallback. It exists for whatever future feature might
+    read raw archived extractions (e.g. an admin "view original extraction"
+    or "re-run formulation" tool), not because a real bug was found today.
+    Could not check live Supabase data directly (no DB access in this
+    sandbox) — if you want to know whether any real stored rows actually
+    have the old shape, run `select id, extracted->'commercial' from
+    submissions where extracted->'commercial'->'demand_charge' is not null`
+    in the Supabase SQL editor.
+  - **IRR/payback got closer, coincidentally**: re-running the "Commercial
+    formulation" section's IRR/payback investigation with the corrected
+    `10.0621` tariff (same `dep_default_commercial=false` assumption) landed
+    at ≈34.13%/≈4.21yr — closer to the ≈34.25%/≈4.275yr target than the
+    ≈34.86%/≈4.14yr found before this fix. Not re-verified against any new
+    target (none was given for this task), just reported for visibility.
+  - Verified via the same scratchpad Node harness as the original
+    commercial-formulation task (not committed to the repo — see that
+    task's Owner note for the path), extended with an assertion that
+    `demand_charge`/`demand_per_unit` no longer appear in
+    `tariff_breakdown` and a hand-computed check of the new
+    `effective_tariff`. Not re-tested in a live browser or against a real
+    commercial bill photo — same standing caveat as the original task.

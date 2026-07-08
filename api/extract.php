@@ -140,6 +140,14 @@ foreach ($imageEntries as $entry) {
 // 2. Schema + shared helpers
 // -----------------------------------------------------------------------
 
+/** category comes from the entry form's radio (app.js already POSTs it
+ *  alongside bill_image[]/bill_pdf) — read once here, used only by the
+ *  dispatch section at the bottom of this file to pick industrial vs.
+ *  commercial. Anything other than the exact string "Commercial" (missing,
+ *  blank, unrecognized) falls through to the industrial path — today's
+ *  only behavior, unchanged. */
+$category = isset($_POST['category']) ? trim($_POST['category']) : '';
+
 function blank_extraction() {
     return array(
         'consumer_number' => null,
@@ -452,6 +460,355 @@ function parse_bill_text($text) {
 }
 
 // -----------------------------------------------------------------------
+// 3b. Commercial extraction — parallel to the industrial helpers above,
+//     never called from the industrial code path. MSEDCL commercial bills
+//     itemise wheeling/duty%/ToD-rebate%/GSC as their own lines instead of
+//     a per-slot ToD table, so this is a genuinely different schema, not a
+//     variant of blank_extraction()/validate_extraction(). No free
+//     text-layer fast path exists for this layout (never verified against a
+//     real commercial bill export) — commercial always pays for vision.
+// -----------------------------------------------------------------------
+
+function blank_commercial_extraction() {
+    return array(
+        'consumer_number' => null,
+        'consumer_name' => null,
+        'tariff_category' => 'Commercial',
+        'tariff_code' => null,
+        'contract_demand_kva' => null,
+        'sanctioned_load_kw' => null,
+        'commercial' => array(
+            'current_month_units' => null,
+            'energy_rate' => null,
+            'wheeling' => null,
+            'fac' => null,
+            'electricity_duty_pct' => null,
+            'tax_on_sale' => null,
+            'tod_rebate_pct' => null,
+            'grid_support_charge' => null,
+        ),
+        'billing_history_units' => array(),
+    );
+}
+
+function canonical_commercial_field_paths() {
+    return array(
+        'consumer_number', 'consumer_name', 'tariff_code',
+        'contract_demand_kva', 'sanctioned_load_kw',
+        'commercial.current_month_units', 'commercial.energy_rate', 'commercial.wheeling',
+        'commercial.fac', 'commercial.electricity_duty_pct',
+        'commercial.tax_on_sale', 'commercial.tod_rebate_pct', 'commercial.grid_support_charge',
+        'billing_history_units',
+    ); // 14 entries
+}
+
+/** Same aggregate + per-entry plausibility check validate_extraction() uses
+ *  for billing_history_units — duplicated rather than shared so the
+ *  industrial function above never has to change to accommodate this. */
+function validate_commercial_billing_history($hist, $modelFlags, &$nr, &$sugg) {
+    $hist = is_array($hist) ? $hist : array();
+    $count = count($hist);
+    $histFailed = ($count > 0 && ($count < 4 || $count > 12));
+    $nr['billing_history_units'] = ($count === 0) || $histFailed || model_flagged('billing_history_units', $modelFlags);
+    if ($count > 0) {
+        $sorted = $hist;
+        sort($sorted);
+        $mid = intdiv($count, 2);
+        $median = ($count % 2 === 0) ? (($sorted[$mid - 1] + $sorted[$mid]) / 2) : $sorted[$mid];
+        foreach ($hist as $i => $val) {
+            $bad = ($val <= 0) || ($median > 0 && abs($val - $median) > 3 * $median);
+            $nr["billing_history_units[$i]"] = $bad;
+        }
+    }
+}
+
+/**
+ * Commercial equivalent of validate_extraction(). Range checks per the
+ * commercial formulation brief: electricity_duty_pct 0-30 (explicit ask),
+ * sanctioned_load_kw required and > 0 (the sizing cap has nothing to cap
+ * against without it) — everything else follows the same "flag if null or
+ * out of a sane Rs/unit range" pattern the industrial validator uses.
+ */
+function validate_commercial_extraction($data, $modelFlags = array()) {
+    $nr = array();
+    $sugg = array();
+    $c = isset($data['commercial']) && is_array($data['commercial']) ? $data['commercial'] : array();
+
+    $flag = function ($path, $failedCheck, $value) use (&$nr, $modelFlags) {
+        $nr[$path] = ($value === null) || $failedCheck || model_flagged($path, $modelFlags);
+    };
+
+    foreach (array('consumer_number', 'consumer_name', 'tariff_code', 'contract_demand_kva') as $k) {
+        $flag($k, false, isset($data[$k]) ? $data[$k] : null);
+    }
+    $sanctioned = isset($data['sanctioned_load_kw']) ? $data['sanctioned_load_kw'] : null;
+    $flag('sanctioned_load_kw', $sanctioned !== null && !in_range($sanctioned, 0.1, 5000), $sanctioned);
+
+    $flag('commercial.current_month_units', !in_range($c['current_month_units'], 50, 1000000) && $c['current_month_units'] !== null, isset($c['current_month_units']) ? $c['current_month_units'] : null);
+    $flag('commercial.energy_rate', !in_range($c['energy_rate'], 3, 15) && $c['energy_rate'] !== null, isset($c['energy_rate']) ? $c['energy_rate'] : null);
+    $flag('commercial.electricity_duty_pct', !in_range($c['electricity_duty_pct'], 0, 30) && $c['electricity_duty_pct'] !== null, isset($c['electricity_duty_pct']) ? $c['electricity_duty_pct'] : null);
+    $flag('commercial.tod_rebate_pct', !in_range($c['tod_rebate_pct'], 0, 50) && $c['tod_rebate_pct'] !== null, isset($c['tod_rebate_pct']) ? $c['tod_rebate_pct'] : null);
+
+    // Small Rs/unit fields also get the paise-not-converted detector, same
+    // heuristic and same ÷100 one-tap fix as validate_extraction()'s four
+    // small-rate fields.
+    $paiseRanges = array('wheeling' => array(0, 5), 'fac' => array(0, 3), 'tax_on_sale' => array(0, 3), 'grid_support_charge' => array(0, 5));
+    foreach ($paiseRanges as $key => $range) {
+        $v = isset($c[$key]) ? $c[$key] : null;
+        $failed = ($v !== null && !in_range($v, $range[0], $range[1]));
+        $flag('commercial.' . $key, $failed, $v);
+        if ($v !== null && $v > 5) {
+            $sugg['commercial.' . $key] = suggest_paise_correction($v);
+        }
+    }
+
+    validate_commercial_billing_history(isset($data['billing_history_units']) ? $data['billing_history_units'] : array(), $modelFlags, $nr, $sugg);
+
+    $canonical = canonical_commercial_field_paths();
+    $flaggedCount = 0;
+    foreach ($canonical as $p) {
+        if (!empty($nr[$p])) $flaggedCount++;
+    }
+    $unitsMissing = !isset($c['current_month_units']) || $c['current_month_units'] === null;
+    $quality = ($unitsMissing || ($flaggedCount / count($canonical)) > 0.40) ? 'poor' : 'ok';
+
+    $allPass = !in_array(true, $nr, true);
+
+    return array(
+        'needs_review' => $nr,
+        'suggested_corrections' => $sugg,
+        'quality' => $quality,
+        'all_pass' => $allPass,
+    );
+}
+
+function commercial_vision_output_schema() {
+    return array(
+        'type' => 'object',
+        'properties' => array(
+            'consumer_number' => array('type' => array('string', 'null')),
+            'consumer_name' => array('type' => array('string', 'null')),
+            'tariff_category' => array('type' => array('string', 'null')),
+            'tariff_code' => array('type' => array('string', 'null')),
+            'contract_demand_kva' => array('type' => array('number', 'null')),
+            'sanctioned_load_kw' => array('type' => array('number', 'null')),
+            'commercial' => array(
+                'type' => 'object',
+                'properties' => array(
+                    'current_month_units' => array('type' => array('number', 'null')),
+                    'energy_rate' => array('type' => array('number', 'null')),
+                    'wheeling' => array('type' => array('number', 'null')),
+                    'fac' => array('type' => array('number', 'null')),
+                    'electricity_duty_pct' => array('type' => array('number', 'null')),
+                    'tax_on_sale' => array('type' => array('number', 'null')),
+                    'tod_rebate_pct' => array('type' => array('number', 'null')),
+                    'grid_support_charge' => array('type' => array('number', 'null')),
+                ),
+                'required' => array(
+                    'current_month_units', 'energy_rate', 'wheeling', 'fac',
+                    'electricity_duty_pct', 'tax_on_sale', 'tod_rebate_pct', 'grid_support_charge',
+                ),
+                'additionalProperties' => false,
+            ),
+            'billing_history_units' => array('type' => 'array', 'items' => array('type' => 'number')),
+            'low_confidence_fields' => array('type' => 'array', 'items' => array('type' => 'string')),
+        ),
+        'required' => array(
+            'consumer_number', 'consumer_name', 'tariff_category', 'tariff_code',
+            'contract_demand_kva', 'sanctioned_load_kw', 'commercial',
+            'billing_history_units', 'low_confidence_fields',
+        ),
+        'additionalProperties' => false,
+    );
+}
+
+/** Commercial equivalent of vision_prompt() — same "read spatially, prefer
+ *  null over a guess" discipline, different field list (no ToD table). */
+function commercial_vision_prompt() {
+    return <<<'EOT'
+You are extracting billing data from a photograph or scan of an Indian
+electricity bill issued by MSEDCL / Mahavitaran (Maharashtra State Electricity
+Distribution Co. Ltd.) for a COMMERCIAL tariff category customer (shops,
+offices, small businesses — not an industrial/manufacturing connection).
+Commercial bills itemise charges differently from industrial ones: wheeling
+charge as its own line, electricity duty as a PERCENTAGE (not Rs/unit), and
+no per-slot Time-of-Day table — instead a single ToD rebate percentage. The
+image may be skewed, low-contrast, stamped, or have values misaligned from
+their labels. Read the whole bill spatially, the way a person would — do not
+read strictly line by line.
+
+Return ONLY a single JSON object, no prose, no markdown fences, exactly this shape:
+
+{
+  "consumer_number": string|null,
+  "consumer_name": string|null,
+  "tariff_category": "Commercial"|null,
+  "tariff_code": string|null,
+  "contract_demand_kva": number|null,
+  "sanctioned_load_kw": number|null,
+  "commercial": {
+    "current_month_units": number|null,
+    "energy_rate": number|null,
+    "wheeling": number|null,
+    "fac": number|null,
+    "electricity_duty_pct": number|null,
+    "tax_on_sale": number|null,
+    "tod_rebate_pct": number|null,
+    "grid_support_charge": number|null
+  },
+  "billing_history_units": [number],
+  "low_confidence_fields": [string]
+}
+
+Rules:
+- current_month_units: this month's total billed consumption, in units (kWh).
+- energy_rate, wheeling, fac, tax_on_sale, grid_support_charge MUST be in
+  RUPEES PER UNIT. MSEDCL prints some of these in "Ps/U" (paise per unit) —
+  if labelled Ps/U or paise, DIVIDE BY 100. Sanity: energy_rate is normally
+  6-10; wheeling/fac/tax_on_sale/grid_support_charge are normally well below 3.
+- wheeling: read the bill's "Wheeling Charges" line (sometimes printed as
+  "Wheeling Chgs" or "Wheeling @ Rs.X/unit") — this is ALREADY a Rs/unit
+  rate, printed per unit, not a monthly total. This is DIFFERENT from any
+  separate "Demand Charges" line that may also appear on the bill — do not
+  confuse the two, and do not read the demand charges figure at all; it is
+  not used.
+- electricity_duty_pct: electricity duty as a PERCENTAGE (e.g. "Electricity
+  Duty @ 21%" -> 21, not 0.21). Sanity: normally 0-30.
+- tod_rebate_pct: the Time-of-Day rebate/incentive as a PERCENTAGE (e.g. "ToD
+  Rebate 15%" -> 15). If the bill only shows a rupee amount for this rather
+  than a labelled percentage, infer it as amount / (energy_rate *
+  current_month_units) * 100.
+- sanctioned_load_kw: the customer's sanctioned/contracted load in kW — read
+  it carefully, do not confuse with contract_demand_kva (a related but
+  different figure in kVA).
+- billing_history_units: the bill has a "Billing History" table listing months
+  and their units. Return the UNITS values, MOST RECENT FIRST, up to 12
+  numbers. Strip thousands separators.
+- If any value is unclear, illegible, or you are guessing, put null for that
+  field and add its dotted path (e.g. "commercial.wheeling") to
+  low_confidence_fields. DO NOT invent numbers — a null the user can fill in
+  is far better than a wrong value.
+- Strip thousands separators from all numbers. Return numbers as numbers, not
+  strings.
+EOT;
+}
+
+/** Defensive type coercion only, same discipline as sanitize_extraction() —
+ *  no unit "correction" here, that's validate_commercial_extraction()'s job. */
+function sanitize_commercial_extraction($data) {
+    $out = blank_commercial_extraction();
+
+    foreach (array('consumer_number', 'consumer_name', 'tariff_code') as $k) {
+        if (isset($data[$k]) && is_string($data[$k]) && trim($data[$k]) !== '') {
+            $out[$k] = trim($data[$k]);
+        }
+    }
+    foreach (array('contract_demand_kva', 'sanctioned_load_kw') as $k) {
+        if (isset($data[$k]) && is_numeric($data[$k])) $out[$k] = (float) $data[$k];
+    }
+
+    $cIn = isset($data['commercial']) && is_array($data['commercial']) ? $data['commercial'] : array();
+    $c = &$out['commercial'];
+    foreach (array('current_month_units', 'energy_rate', 'wheeling', 'fac', 'electricity_duty_pct', 'tax_on_sale', 'tod_rebate_pct', 'grid_support_charge') as $k) {
+        if (isset($cIn[$k]) && is_numeric($cIn[$k])) $c[$k] = (float) $cIn[$k];
+    }
+
+    if (isset($data['billing_history_units']) && is_array($data['billing_history_units'])) {
+        $hist = array();
+        foreach ($data['billing_history_units'] as $v) {
+            if (is_numeric($v)) $hist[] = (float) $v;
+        }
+        $out['billing_history_units'] = array_slice($hist, 0, 12);
+    }
+
+    return $out;
+}
+
+/** Duplicated from call_vision_api_attempt()/call_vision_api() rather than
+ *  parameterizing them in place — this file's one deliberate exception to
+ *  "parameterize, don't duplicate": the curl mechanics are identical, but
+ *  keeping the industrial functions' signatures and bodies 100% untouched
+ *  is worth ~50 duplicated lines for a zero-regression guarantee on the
+ *  path every existing customer already goes through. */
+function call_commercial_vision_api_attempt($images) {
+    if (!defined('ANTHROPIC_API_KEY') || ANTHROPIC_API_KEY === '' || strpos(ANTHROPIC_API_KEY, 'REPLACE_ME') === 0) {
+        throw new \Exception('the vision API key has not been configured yet (api/config.php)');
+    }
+
+    $content = array();
+    foreach ($images as $image) {
+        $bytes = file_get_contents($image['tmp_name']);
+        if ($bytes === false) throw new \Exception('could not read the uploaded file');
+        $content[] = array(
+            'type' => 'image',
+            'source' => array('type' => 'base64', 'media_type' => $image['media_type'], 'data' => base64_encode($bytes)),
+        );
+    }
+    $content[] = array('type' => 'text', 'text' => commercial_vision_prompt());
+
+    $body = array(
+        'model' => defined('ANTHROPIC_MODEL') ? ANTHROPIC_MODEL : 'claude-opus-4-8',
+        'max_tokens' => 2048,
+        'messages' => array(array('role' => 'user', 'content' => $content)),
+        'tools' => array(array(
+            'name' => 'extract_commercial_bill',
+            'description' => 'Return the extracted MSEDCL commercial bill fields',
+            'input_schema' => commercial_vision_output_schema(),
+        )),
+        'tool_choice' => array('type' => 'tool', 'name' => 'extract_commercial_bill'),
+    );
+
+    $ch = curl_init('https://api.anthropic.com/v1/messages');
+    curl_setopt_array($ch, array(
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_HTTPHEADER => array(
+            'Content-Type: application/json',
+            'x-api-key: ' . ANTHROPIC_API_KEY,
+            'anthropic-version: 2023-06-01',
+        ),
+        CURLOPT_POSTFIELDS => json_encode($body),
+        CURLOPT_TIMEOUT => 60,
+    ));
+    $raw = curl_exec($ch);
+    $curlErr = curl_error($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+    if ($raw === false) throw new \Exception('could not reach the vision service (' . $curlErr . ')');
+    $resp = json_decode($raw, true);
+    if ($httpCode !== 200) {
+        $msg = (is_array($resp) && isset($resp['error']['message'])) ? $resp['error']['message'] : ('HTTP ' . $httpCode);
+        throw new \Exception('vision service error: ' . $msg);
+    }
+    if (!is_array($resp) || !isset($resp['content']) || !is_array($resp['content'])) {
+        throw new \Exception('vision service returned an unexpected response');
+    }
+
+    $toolInput = null;
+    foreach ($resp['content'] as $block) {
+        if (isset($block['type']) && $block['type'] === 'tool_use' && isset($block['name']) && $block['name'] === 'extract_commercial_bill') {
+            $toolInput = isset($block['input']) ? $block['input'] : null;
+            break;
+        }
+    }
+    if (!is_array($toolInput)) throw new \Exception('vision service did not return any extracted data');
+
+    $modelFlags = (isset($toolInput['low_confidence_fields']) && is_array($toolInput['low_confidence_fields']))
+        ? array_values(array_filter($toolInput['low_confidence_fields'], 'is_string'))
+        : array();
+
+    return array('data' => sanitize_commercial_extraction($toolInput), 'model_flags' => $modelFlags);
+}
+
+function call_commercial_vision_api($images) {
+    try {
+        return call_commercial_vision_api_attempt($images);
+    } catch (\Exception $e1) {
+        return call_commercial_vision_api_attempt($images);
+    }
+}
+
+// -----------------------------------------------------------------------
 // 4. Vision path (exact prompt from extraction_hardening.md)
 // -----------------------------------------------------------------------
 
@@ -721,6 +1078,30 @@ function call_vision_api($images) {
 // -----------------------------------------------------------------------
 // 5. Dispatch
 // -----------------------------------------------------------------------
+
+// Commercial: its own schema/prompt/validator, vision-only (no free
+// text-layer fast path — see the "3b. Commercial extraction" comment
+// above). Early-returns, so nothing below this block runs for a commercial
+// request; every non-commercial request (including a missing/unrecognized
+// category — today's only case) falls through to the industrial path
+// exactly as before.
+if ($category === 'Commercial') {
+    try {
+        $vision = call_commercial_vision_api($images);
+    } catch (\Exception $e) {
+        respond_error("We couldn't read this bill (" . $e->getMessage() . "). Please fill in the values yourself below.");
+    }
+
+    $val = validate_commercial_extraction($vision['data'], $vision['model_flags']);
+    respond(array(
+        'success' => true,
+        'data' => $vision['data'],
+        'needs_review' => $val['needs_review'],
+        'suggested_corrections' => $val['suggested_corrections'],
+        'quality' => $val['quality'],
+        'source' => 'vision',
+    ));
+}
 
 // Optional free fast-path: only if the client also sent the original PDF.
 if (isset($_FILES['bill_pdf']) && $_FILES['bill_pdf']['error'] === UPLOAD_ERR_OK) {

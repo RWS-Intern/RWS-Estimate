@@ -6,7 +6,7 @@
 <title>Free Solar Rooftop Estimate | Rite Solar</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
 <!-- bump ?v= when style.css changes, to bust browser/CDN cache -->
-<link rel="stylesheet" href="assets/css/style.css?v=1">
+<link rel="stylesheet" href="assets/css/style.css?v=2">
 </head>
 <body>
 
@@ -135,13 +135,15 @@
         <div class="note">Rates must be in Rs per unit, not paise. If a rate
           looks 100&times; too large, divide it by 100.</div>
 
-        <div class="section-label">Time-of-Day (ToD) Slots</div>
-        <table class="tod-table">
-          <thead><tr><th>Slot</th><th>Units</th><th>Rate (Rs/unit)</th></tr></thead>
-          <tbody id="todBody"><!-- rows injected by JS --></tbody>
-        </table>
-        <div class="note">The 09:00&ndash;17:00 daytime rate is often
-          <em>negative</em> (a rebate) &mdash; that's expected, don't remove the minus sign.</div>
+        <div id="todSection">
+          <div class="section-label">Time-of-Day (ToD) Slots</div>
+          <table class="tod-table">
+            <thead><tr><th>Slot</th><th>Units</th><th>Rate (Rs/unit)</th></tr></thead>
+            <tbody id="todBody"><!-- rows injected by JS --></tbody>
+          </table>
+          <div class="note">The 09:00&ndash;17:00 daytime rate is often
+            <em>negative</em> (a rebate) &mdash; that's expected, don't remove the minus sign.</div>
+        </div>
 
         <div class="section-label">Billing History (units, most recent first)</div>
         <div class="note warn" id="historyNote" style="display:none"></div>
@@ -312,16 +314,16 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <!-- bump ?v= when config-defaults.js changes, to bust browser/CDN cache -->
-<script src="assets/config-defaults.js?v=1"></script>
+<script src="assets/config-defaults.js?v=2"></script>
 <!-- bump ?v= when formulation.js changes, to bust browser/CDN cache -->
-<script src="assets/formulation.js?v=1"></script>
+<script src="assets/formulation.js?v=3"></script>
 <!-- bump ?v= when engine.js changes, to bust browser/CDN cache -->
-<script src="assets/engine.js?v=1"></script>
+<script src="assets/engine.js?v=2"></script>
 <!-- bump ?v= when charts.js changes, to bust browser/CDN cache -->
 <script src="assets/charts.js?v=1"></script>
 <!-- bump ?v= when report.js changes, to bust browser/CDN cache -->
-<script src="assets/report.js?v=1"></script>
+<script src="assets/report.js?v=3"></script>
 <!-- bump ?v= when app.js changes, to bust browser/CDN cache -->
-<script src="assets/js/app.js?v=1"></script>
+<script src="assets/js/app.js?v=3"></script>
 </body>
 </html>

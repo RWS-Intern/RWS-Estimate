@@ -67,6 +67,15 @@
         { key: "savings_rate", label: "Savings account rate", hint: "fraction, e.g. 0.035 = 3.5%", type: "fraction" },
         { key: "equity_rate", label: "Equity market rate", hint: "fraction, e.g. 0.12 = 12% — context only, equity carries market risk", type: "fraction" }
       ]
+    },
+    {
+      title: "Commercial",
+      fields: [
+        { key: "solar_hour_share_pct", label: "Solar-hour usage share", hint: "%, 0-100 — commercial meters don't split ToD, so this replaces industrial's measured daytime fraction", type: "number", min: 0, max: 100 },
+        { key: "gst_pct_commercial", label: "GST rate (commercial)", hint: "%, e.g. 8.9 = 8.9% — a percent NUMBER, not a fraction like the industrial GST rate above", type: "number", min: 0, max: 100 },
+        { key: "dep_default_commercial", label: "Depreciation benefit ON by default (commercial)", hint: "starting position of the dashboard's depreciation toggle for a commercial customer — defaults OFF, separate from industrial's dep_default", type: "bool" },
+        { key: "commercial_rate_table", label: "Price per kWp lookup table", hint: "JSON array of {\"kwp\":threshold,\"rate\":Rs per kWp}, sorted ascending — the highest threshold at or below the sized system's kWp wins", type: "json" }
+      ]
     }
   ];
 
@@ -154,6 +163,11 @@
         o.textContent = opt === "06-17" ? "06:00–17:00" : "09:00–17:00";
         el.appendChild(o);
       });
+    } else if (f.type === "json") {
+      el = document.createElement("textarea");
+      el.id = "cfg-" + f.key;
+      el.rows = 6;
+      el.className = "admin-json-field";
     } else {
       el = document.createElement("input");
       el.type = "number";
@@ -185,8 +199,8 @@
       grid.className = "grid2";
       group.fields.forEach(function (f) {
         var el = buildField(f);
-        if (f.type === "bool") {
-          g.appendChild(el); // full-width toggle row, not part of the 2-col grid
+        if (f.type === "bool" || f.type === "json") {
+          g.appendChild(el); // full-width row — a toggle, or a multi-line JSON textarea
         } else {
           grid.appendChild(el);
         }
@@ -204,6 +218,8 @@
         var v = config[f.key];
         if (f.type === "bool") {
           el.checked = !!v;
+        } else if (f.type === "json") {
+          el.value = (v === undefined || v === null) ? "" : JSON.stringify(v, null, 2);
         } else {
           el.value = (v === undefined || v === null) ? "" : v;
         }
@@ -223,6 +239,23 @@
         if (f.type === "select") {
           if (f.options.indexOf(el.value) === -1) { errors.push(f.label + " must be one of: " + f.options.join(", ") + "."); return; }
           config[f.key] = el.value;
+          return;
+        }
+        if (f.type === "json") {
+          var parsed;
+          try {
+            parsed = JSON.parse(el.value);
+          } catch (e) {
+            errors.push(f.label + " must be valid JSON.");
+            return;
+          }
+          if (!Array.isArray(parsed) || !parsed.every(function (row) {
+            return row && typeof row === "object" && typeof row.kwp === "number" && typeof row.rate === "number";
+          })) {
+            errors.push(f.label + " must be a JSON array of {\"kwp\":number,\"rate\":number} objects.");
+            return;
+          }
+          config[f.key] = parsed;
           return;
         }
         var raw = el.value.trim();

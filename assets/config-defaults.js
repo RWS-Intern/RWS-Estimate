@@ -45,8 +45,36 @@
     daytime_window: "06-17",
     years: 25,
 
+    // commercial-only formulation constants (industrial keys above are
+    // untouched) — see SPEC.md's "Commercial formulation" section.
+    // solar_hour_share_pct: commercial meters usually don't split usage by
+    // time of day, so this replaces industrial's measured daytime_fraction.
+    solar_hour_share_pct: 75,
+    // gst_pct_commercial: a PERCENT NUMBER (8.9 = 8.9%), matching the
+    // tax_default/dp_default convention below — not a 0-1 fraction like
+    // gst_rate above.
+    gst_pct_commercial: 8.9,
+    // commercial_rate_table: floor lookup, {kwp: threshold, rate: Rs/kWp}
+    // sorted ascending — the highest threshold <= the sized system's kWp
+    // wins. Small commercial systems cost more per kWp than large
+    // industrial ones, hence a table instead of one flat rate_per_kwp.
+    commercial_rate_table: [
+      { kwp: 0, rate: 58000 },
+      { kwp: 10, rate: 54000 },
+      { kwp: 25, rate: 52000 },
+      { kwp: 50, rate: 50000 },
+      { kwp: 100, rate: 48000 }
+    ],
+
     // scenario defaults (starting slider positions on the dashboard)
     dep_default: true,
+    // dep_default_commercial: commercial's depreciation-toggle starting
+    // position — separate from industrial's dep_default because a small
+    // commercial system's accelerated-depreciation tax benefit is far less
+    // certain to apply than a large industrial one; defaults to OFF so the
+    // customer opts in rather than sees an assumed benefit they may not
+    // actually be able to claim. Toggle is still customer-editable either way.
+    dep_default_commercial: false,
     tax_default: 25.18,
     loan_default: false,
     dp_default: 20,

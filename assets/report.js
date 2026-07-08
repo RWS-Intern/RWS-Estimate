@@ -427,6 +427,67 @@
     return y + cardH;
   }
 
+  /** Plain-text (no HTML) equivalents of app.js's renderIndustrialNarrative()/
+   *  renderCommercialNarrative() — same duplicated-prose convention this
+   *  file already follows for the industrial case, extended to commercial. */
+  function narrativeCards(formulation) {
+    var monthsNote = formulation.months_used < 12
+      ? (" (based on " + formulation.months_used + " month" + (formulation.months_used === 1 ? "" : "s") + " of billing history)")
+      : "";
+
+    if (formulation.category === "Commercial") {
+      var tb = formulation.tariff_breakdown;
+      var sizeReason = formulation.sized_by_sanctioned_load
+        ? ("capped at your sanctioned load of " + formulation.sanctioned_load_kw + " kW — your annual usage alone would " +
+           "support a larger system, but your grid connection is the limiting factor.")
+        : ("we round up to " + formulation.offered_kwp + " kWp so the system fully covers that usage, within your " +
+           "sanctioned load of " + formulation.sanctioned_load_kw + " kW.");
+      return {
+        cardA: {
+          title: "1 · System size -> " + formulation.offered_kwp + " kWp",
+          body: "Commercial meters usually don't split usage by time of day, so we assume about " +
+            formulation.solar_hour_share_pct + "% of your annual usage" + monthsNote +
+            " happens when solar can supply it. That works out to " + formulation.required_kwp_exact.toFixed(2) +
+            " kWp of load; " + sizeReason
+        },
+        cardB: {
+          title: "2 · Per-unit value -> ₹" + formulation.effective_tariff.toFixed(2) + "/unit",
+          body: "Built bottom-up from your tariff: base energy ₹" + tb.energy_rate.toFixed(2) +
+            " + wheeling ₹" + tb.wheeling.toFixed(2) + " + FAC ₹" + tb.fac.toFixed(2) +
+            " + duty " + tb.electricity_duty_pct +
+            "% (₹" + tb.duty_per_unit.toFixed(2) + ") + tax-on-sale ₹" + tb.tax_on_sale.toFixed(2) +
+            " - ToD rebate " + tb.tod_rebate_pct + "% (₹" + tb.tod_rebate_per_unit.toFixed(2) +
+            ") - Grid Support Charge ₹" + tb.grid_support_charge.toFixed(2) + " = ₹" +
+            formulation.effective_tariff.toFixed(2) + "/unit — the real value each solar unit offsets."
+        }
+      };
+    }
+
+    var itb = formulation.tariff_breakdown;
+    var windowLabel = formulation.daytime_window === "09-17" ? "09:00-17:00" : "06:00-17:00";
+    var pct = Math.round(formulation.daytime_fraction * 100);
+    var todTerm = itb.daytime_tod_rate < 0
+      ? ("- daytime ToD rebate ₹" + Math.abs(itb.daytime_tod_rate).toFixed(2))
+      : ("+ daytime ToD charge ₹" + itb.daytime_tod_rate.toFixed(2));
+    return {
+      cardA: {
+        title: "1 · System size -> " + formulation.offered_kwp + " kWp",
+        body: "Solar only produces during the " + windowLabel + " window — about " + pct +
+          "% of your annual usage" + monthsNote + ". Your load needs " +
+          formulation.required_kwp_exact.toFixed(2) + " kWp for full daytime cover; we round up to " +
+          formulation.offered_kwp + " kWp so the system fully meets daytime demand, with a little headroom."
+      },
+      cardB: {
+        title: "2 · Per-unit value -> ₹" + formulation.effective_tariff.toFixed(2) + "/unit",
+        body: "Built bottom-up from your tariff: base energy ₹" + itb.energy_rate.toFixed(2) +
+          " + demand ₹" + itb.demand_charge_per_unit.toFixed(2) + " + FAC ₹" + itb.fac.toFixed(2) +
+          " + duty ₹" + itb.electricity_duty.toFixed(2) + " + tax-on-sale ₹" + itb.tax_on_sale.toFixed(2) +
+          " " + todTerm + " - Grid Support Charge ₹" + itb.gsc.toFixed(2) + " = ₹" +
+          formulation.effective_tariff.toFixed(2) + "/unit — the real value each solar unit offsets, net of the ToD rebate and the GSC."
+      }
+    };
+  }
+
   function drawTechnicalSnapshotTable(doc, y, lock, config, m) {
     var inr = window.RiteEngine.inr;
     var rows = [
@@ -604,8 +665,9 @@
       var allCashScenario = Object.assign({}, scenario, { loan: false });
       var allCashM = RiteEngine.compute(lock, config, allCashScenario);
 
+      var depDefault = formulation.category === "Commercial" ? config.dep_default_commercial : config.dep_default;
       var stdFinScenario = {
-        dep: config.dep_default, tax: config.tax_default, loan: true,
+        dep: depDefault, tax: config.tax_default, loan: true,
         dp: config.dp_default, rate: config.loan_rate_default,
         ten: config.tenure_months_default, fd: config.fd_rate_default
       };
@@ -634,33 +696,8 @@
       var cumulativeChart = renderCumulativeChartImage(allCashM.rows);
       y = drawChartImage(doc, y, cumulativeChart, 165);
 
-      var tb = formulation.tariff_breakdown;
-      var windowLabel = formulation.daytime_window === "09-17" ? "09:00-17:00" : "06:00-17:00";
-      var pct = Math.round(formulation.daytime_fraction * 100);
-      var monthsNote = formulation.months_used < 12
-        ? (" (based on " + formulation.months_used + " month" + (formulation.months_used === 1 ? "" : "s") + " of billing history)")
-        : "";
-      var todTerm = tb.daytime_tod_rate < 0
-        ? ("- daytime ToD rebate ₹" + Math.abs(tb.daytime_tod_rate).toFixed(2))
-        : ("+ daytime ToD charge ₹" + tb.daytime_tod_rate.toFixed(2));
-
-      y = drawExplainerCards(doc, y,
-        {
-          title: "1 · System size -> " + formulation.offered_kwp + " kWp",
-          body: "Solar only produces during the " + windowLabel + " window — about " + pct +
-            "% of your annual usage" + monthsNote + ". Your load needs " +
-            formulation.required_kwp_exact.toFixed(2) + " kWp for full daytime cover; we round up to " +
-            formulation.offered_kwp + " kWp so the system fully meets daytime demand, with a little headroom."
-        },
-        {
-          title: "2 · Per-unit value -> ₹" + formulation.effective_tariff.toFixed(2) + "/unit",
-          body: "Built bottom-up from your tariff: base energy ₹" + tb.energy_rate.toFixed(2) +
-            " + demand ₹" + tb.demand_charge_per_unit.toFixed(2) + " + FAC ₹" + tb.fac.toFixed(2) +
-            " + duty ₹" + tb.electricity_duty.toFixed(2) + " + tax-on-sale ₹" + tb.tax_on_sale.toFixed(2) +
-            " " + todTerm + " - Grid Support Charge ₹" + tb.gsc.toFixed(2) + " = ₹" +
-            formulation.effective_tariff.toFixed(2) + "/unit — the real value each solar unit offsets, net of the ToD rebate and the GSC."
-        }
-      );
+      var cards = narrativeCards(formulation);
+      y = drawExplainerCards(doc, y, cards.cardA, cards.cardB);
       y += 16;
 
       y = heading(doc, y, "Technical snapshot", 14);

@@ -540,6 +540,11 @@
           t09_17: { units: null, rate: null }, t17_24: { units: null, rate: null }
         }
       },
+      commercial: {
+        current_month_units: null, energy_rate: null, wheeling: null, fac: null,
+        electricity_duty_pct: null, tax_on_sale: null,
+        tod_rebate_pct: null, grid_support_charge: null
+      },
       billing_history_units: []
     };
   }
@@ -614,6 +619,15 @@
           input.appendChild(o);
         });
         input.value = (spec.value === "Industrial" || spec.value === "Commercial") ? spec.value : (currentCategoryGuess() || "Commercial");
+        // Manually flipping category on the confirm screen invalidates the
+        // OTHER shape's field values (industrial's ToD table vs commercial's
+        // wheeling/duty%/etc are not interchangeable) — reset the rate
+        // section to a blank version of whichever shape is now selected
+        // rather than leaving stale, wrongly-labelled values on screen.
+        input.addEventListener("change", function () {
+          var blank = blankExtraction();
+          renderRateSection({ tariff_category: input.value, current_month: blank.current_month, commercial: blank.commercial }, {}, {});
+        });
       } else {
         input = document.createElement("input");
         input.type = spec.type === "number" ? "number" : "text";
@@ -660,6 +674,39 @@
     stableNullFirstSort(items).forEach(function (it) { container.appendChild(it.el); });
   }
 
+  /** Commercial equivalent of buildRateFields() — wheeling/duty%/ToD-rebate%/
+   *  GSC instead of industrial's ToD-table-fed shape. Same #rateFieldsGrid
+   *  container; renderConfirmForm() picks whichever of the two builders
+   *  runs based on category. (There used to be a separate "Demand charge"
+   *  field here too — real bills showed that was the SAME bill line as
+   *  wheeling under a wrong label, so it was removed; wheeling is the only
+   *  field for it now.) */
+  function buildCommercialRateFields(data, nr, sugg) {
+    var container = document.getElementById("rateFieldsGrid");
+    container.innerHTML = "";
+    var c = data.commercial || {};
+    var specs = [
+      { path: "commercial.current_month_units", idSuffix: "cm-units", label: "Total units this month", value: c.current_month_units },
+      { path: "commercial.energy_rate", idSuffix: "cm-energy_rate", label: "Energy rate (Rs/unit)", value: c.energy_rate },
+      { path: "commercial.wheeling", idSuffix: "cm-wheeling", label: "Wheeling charge (Rs/unit)", value: c.wheeling },
+      { path: "commercial.fac", idSuffix: "cm-fac", label: "FAC (Rs/unit)", value: c.fac },
+      { path: "commercial.electricity_duty_pct", idSuffix: "cm-duty_pct", label: "Electricity duty (%)", value: c.electricity_duty_pct },
+      { path: "commercial.tax_on_sale", idSuffix: "cm-tax_on_sale", label: "Tax on sale (Rs/unit)", value: c.tax_on_sale },
+      { path: "commercial.tod_rebate_pct", idSuffix: "cm-tod_rebate_pct", label: "ToD rebate (%)", value: c.tod_rebate_pct },
+      { path: "commercial.grid_support_charge", idSuffix: "cm-gsc", label: "Grid Support Charge (Rs/unit)", value: c.grid_support_charge }
+    ];
+    var items = specs.map(function (spec) {
+      var input = document.createElement("input");
+      input.type = "number"; input.step = "any";
+      input.id = "c-" + spec.idSuffix;
+      input.value = fmtInput(spec.value);
+      var needsReview = !!nr[spec.path];
+      var el = makeFieldDiv(spec.label, input, needsReview, sugg[spec.path]);
+      return { el: el, isNull: isNullish(spec.value) };
+    });
+    stableNullFirstSort(items).forEach(function (it) { container.appendChild(it.el); });
+  }
+
   function buildTodRows(data, nr) {
     var tod = (data.current_month && data.current_month.tod) || {};
     var body = document.getElementById("todBody");
@@ -697,6 +744,23 @@
       return { el: tr, isNull: isNullish(v.units) || isNullish(v.rate) };
     });
     stableNullFirstSort(rows).forEach(function (r) { body.appendChild(r.el); });
+  }
+
+  /** Picks industrial's ToD-table rate fields or commercial's wheeling/
+   *  duty%/etc rate fields and shows/hides the ToD table section to match —
+   *  the one branch point every caller of the rate-fields UI goes through
+   *  (renderConfirmForm() on initial load, the category-select's change
+   *  handler in buildCustomerFields() on a manual flip). */
+  function renderRateSection(data, nr, sugg) {
+    var todSection = document.getElementById("todSection");
+    if (data.tariff_category === "Commercial") {
+      buildCommercialRateFields(data, nr, sugg);
+      todSection.style.display = "none";
+    } else {
+      buildRateFields(data, nr, sugg);
+      buildTodRows(data, nr);
+      todSection.style.display = "";
+    }
   }
 
   function buildHistoryItems(data, nr) {
@@ -770,8 +834,7 @@
     }
 
     buildCustomerFields(data, needsReview, suggestedCorrections);
-    buildRateFields(data, needsReview, suggestedCorrections);
-    buildTodRows(data, needsReview);
+    renderRateSection(data, needsReview, suggestedCorrections);
     buildHistoryItems(data, needsReview);
   }
 
@@ -786,14 +849,56 @@
     return raw === "" ? null : raw;
   }
 
-  function collectConfirmedData() {
+  /** Industrial's ToD-table fields — only present in the DOM (and only
+   *  meaningful) when the category select is on "Industrial"; reads back
+   *  blank-shaped nulls otherwise since #todBody/#rateFieldsGrid then hold
+   *  the commercial fields instead. */
+  function collectIndustrialCurrentMonth() {
     var tod = {};
     TOD_SLOTS.forEach(function (slot) {
+      var unitsEl = document.getElementById("c-tod-" + slot.key + "-units");
+      var rateEl = document.getElementById("c-tod-" + slot.key + "-rate");
       tod[slot.key] = {
-        units: numOrNull("c-tod-" + slot.key + "-units"),
-        rate: numOrNull("c-tod-" + slot.key + "-rate")
+        units: unitsEl ? numOrNull("c-tod-" + slot.key + "-units") : null,
+        rate: rateEl ? numOrNull("c-tod-" + slot.key + "-rate") : null
       };
     });
+    var totalUnitsEl = document.getElementById("c-total_units");
+    if (!totalUnitsEl) {
+      return blankExtraction().current_month;
+    }
+    return {
+      total_units: numOrNull("c-total_units"),
+      energy_rate: numOrNull("c-energy_rate"),
+      demand_charge_per_unit: numOrNull("c-demand_charge_per_unit"),
+      fac: numOrNull("c-fac"),
+      electricity_duty: numOrNull("c-electricity_duty"),
+      tax_on_sale: numOrNull("c-tax_on_sale"),
+      tod: tod
+    };
+  }
+
+  /** Commercial equivalent — reads the c-cm-* fields buildCommercialRateFields()
+   *  renders; returns blank-shaped nulls if they're not in the DOM (category
+   *  is on "Industrial"). */
+  function collectCommercialFields() {
+    var unitsEl = document.getElementById("c-cm-units");
+    if (!unitsEl) {
+      return blankExtraction().commercial;
+    }
+    return {
+      current_month_units: numOrNull("c-cm-units"),
+      energy_rate: numOrNull("c-cm-energy_rate"),
+      wheeling: numOrNull("c-cm-wheeling"),
+      fac: numOrNull("c-cm-fac"),
+      electricity_duty_pct: numOrNull("c-cm-duty_pct"),
+      tax_on_sale: numOrNull("c-cm-tax_on_sale"),
+      tod_rebate_pct: numOrNull("c-cm-tod_rebate_pct"),
+      grid_support_charge: numOrNull("c-cm-gsc")
+    };
+  }
+
+  function collectConfirmedData() {
     var history = [];
     for (var i = 0; i < HISTORY_MONTHS; i++) {
       var v = numOrNull("c-hist-" + i);
@@ -806,15 +911,8 @@
       tariff_code: strOrNull("c-tariff_code"),
       contract_demand_kva: numOrNull("c-contract_demand_kva"),
       sanctioned_load_kw: numOrNull("c-sanctioned_load_kw"),
-      current_month: {
-        total_units: numOrNull("c-total_units"),
-        energy_rate: numOrNull("c-energy_rate"),
-        demand_charge_per_unit: numOrNull("c-demand_charge_per_unit"),
-        fac: numOrNull("c-fac"),
-        electricity_duty: numOrNull("c-electricity_duty"),
-        tax_on_sale: numOrNull("c-tax_on_sale"),
-        tod: tod
-      },
+      current_month: collectIndustrialCurrentMonth(),
+      commercial: collectCommercialFields(),
       billing_history_units: history
     };
   }
@@ -869,9 +967,9 @@
     setSliderPair("d_r_fd", "d_n_fd", "d_v_fd", scenario.fd);
   }
 
-  /** Templates the "how we sized your plant & priced each unit" cards from
-   *  this customer's own derived values — see SPEC.md's Formulas section. */
-  function renderNarrative(formulation) {
+  /** Industrial narrative — the ORIGINAL renderNarrative() body, unchanged,
+   *  just renamed so renderNarrative() can dispatch on category. */
+  function renderIndustrialNarrative(formulation) {
     var windowLabel = formulation.daytime_window === "09-17" ? "09:00–17:00" : "06:00–17:00";
     var pct = Math.round(formulation.daytime_fraction * 100);
     var monthsNote = formulation.months_used < 12
@@ -895,6 +993,45 @@
       tb.electricity_duty.toFixed(2) + "</b> + tax-on-sale <b>₹" + tb.tax_on_sale.toFixed(2) + "</b> " + todTerm +
       " − Grid Support Charge <b>₹" + tb.gsc.toFixed(2) + "</b> = <b>₹" + formulation.effective_tariff.toFixed(2) +
       "/unit</b> — the real value each solar unit offsets, net of the ToD rebate and the GSC.";
+  }
+
+  /** Commercial narrative — parallel to renderIndustrialNarrative() above,
+   *  built from deriveCommercial()'s solar-hour-share/sanctioned-load sizing
+   *  story and wheeling/duty%/ToD-rebate%/GSC tariff breakdown instead of a
+   *  measured daytime fraction and a ToD table. */
+  function renderCommercialNarrative(formulation) {
+    var monthsNote = formulation.months_used < 12
+      ? (" (based on " + formulation.months_used + " month" + (formulation.months_used === 1 ? "" : "s") + " of billing history)")
+      : "";
+    var sizeReason = formulation.sized_by_sanctioned_load
+      ? ("capped at your sanctioned load of <b>" + formulation.sanctioned_load_kw + " kW</b> — your annual usage alone would " +
+         "support a larger system, but your grid connection is the limiting factor.")
+      : ("we round UP to <b>" + formulation.offered_kwp + " kWp</b> so the system fully covers that usage, within your " +
+         "sanctioned load of " + formulation.sanctioned_load_kw + " kW.");
+
+    document.getElementById("d_why_size_h").textContent = "1 · System size → " + formulation.offered_kwp + " kWp";
+    document.getElementById("d_why_size_p").innerHTML =
+      "Commercial meters usually don't split usage by time of day, so we assume about <b>" + formulation.solar_hour_share_pct +
+      "%</b> of your annual usage" + monthsNote + " happens when solar can supply it. That works out to <b>" +
+      formulation.required_kwp_exact.toFixed(2) + " kWp</b> of load; " + sizeReason;
+
+    var tb = formulation.tariff_breakdown;
+    document.getElementById("d_why_rate_h").textContent = "2 · Per-unit value → ₹" + formulation.effective_tariff.toFixed(2) + "/unit";
+    document.getElementById("d_why_rate_p").innerHTML =
+      "Built bottom-up from your tariff: base energy <b>₹" + tb.energy_rate.toFixed(2) + "</b> + wheeling <b>₹" +
+      tb.wheeling.toFixed(2) + "</b> + FAC <b>₹" + tb.fac.toFixed(2) +
+      "</b> + duty <b>" + tb.electricity_duty_pct + "%</b> (₹" + tb.duty_per_unit.toFixed(2) + ") + tax-on-sale <b>₹" +
+      tb.tax_on_sale.toFixed(2) + "</b> − ToD rebate <b>" + tb.tod_rebate_pct + "%</b> (₹" + tb.tod_rebate_per_unit.toFixed(2) +
+      ") − Grid Support Charge <b>₹" + tb.grid_support_charge.toFixed(2) + "</b> = <b>₹" + formulation.effective_tariff.toFixed(2) +
+      "/unit</b> — the real value each solar unit offsets.";
+  }
+
+  function renderNarrative(formulation) {
+    if (formulation.category === "Commercial") {
+      renderCommercialNarrative(formulation);
+    } else {
+      renderIndustrialNarrative(formulation);
+    }
   }
 
   /** Recomputes the engine from the current dashState and repaints every
@@ -1046,9 +1183,16 @@
       dashState.config = config;
       dashState.formulation = formulation;
       dashState.confirmed = confirmed;
-      dashState.lock = { size: formulation.offered_kwp, gen: config.gen_per_kwp_day, flatRate: formulation.effective_tariff };
+      dashState.lock = {
+        size: formulation.offered_kwp, gen: config.gen_per_kwp_day, flatRate: formulation.effective_tariff,
+        ratePerKwp: formulation.rate_per_kwp, gstRate: formulation.gst_rate
+      };
+      // dep_default_commercial (defaults OFF) vs. industrial's dep_default
+      // (defaults ON) — see config-defaults.js for why these differ; every
+      // other scenario slider starts from the same shared default either way.
+      var depDefault = formulation.category === "Commercial" ? config.dep_default_commercial : config.dep_default;
       dashState.scenario = {
-        dep: config.dep_default, tax: config.tax_default, loan: config.loan_default,
+        dep: depDefault, tax: config.tax_default, loan: config.loan_default,
         dp: config.dp_default, rate: config.loan_rate_default, ten: config.tenure_months_default, fd: config.fd_rate_default
       };
 

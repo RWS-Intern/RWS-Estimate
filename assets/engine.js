@@ -58,12 +58,19 @@
   }
 
   /**
-   * @param {object} lock - {size: offered_kwp, gen: units/kWp/day, flatRate: effective_tariff}
+   * @param {object} lock - {size: offered_kwp, gen: units/kWp/day,
+   *   flatRate: effective_tariff, ratePerKwp?: per-customer Rs/kWp,
+   *   gstRate?: per-customer GST fraction}. ratePerKwp/gstRate let a
+   *   category whose price isn't a flat global constant (e.g. commercial's
+   *   size-based rate lookup table) size correctly; when absent, falls back
+   *   to the global config values — today's industrial behavior, unchanged.
    * @param {object} config - resolved app_config (see config-defaults.js)
    * @param {object} scenario - {dep, tax, loan, dp, rate, ten, fd} (S in the original)
    */
   function compute(lock, config, scenario) {
-    var grossCost = lock.size * config.rate_per_kwp, gstAmt = grossCost * config.gst_rate,
+    var ratePerKwp = (lock.ratePerKwp !== undefined && lock.ratePerKwp !== null) ? lock.ratePerKwp : config.rate_per_kwp;
+    var gstRate = (lock.gstRate !== undefined && lock.gstRate !== null) ? lock.gstRate : config.gst_rate;
+    var grossCost = lock.size * ratePerKwp, gstAmt = grossCost * gstRate,
       netCost = grossCost + gstAmt, exGst = grossCost;
     var amc1 = lock.size * config.amc_rate_per_kwp, sparesEvt = lock.size * config.spares_rate_per_kwp,
       tax = scenario.tax / 100;
