@@ -47,7 +47,7 @@ wiring" and "Admin page" below.
   "current_month": {
     "total_units": 0,
     "energy_rate": 0,
-    "demand_charge_per_unit": 0,
+    "wheeling_per_unit": 0,
     "fac": 0,
     "electricity_duty": 0,
     "tax_on_sale": 0,
@@ -82,9 +82,18 @@ Notes:
 - `tariff_code`: e.g. `"LT-V B II"`.
 - `current_month.total_units`: e.g. `5703`.
 - `current_month.energy_rate`: base energy Rs/unit, e.g. `7.66`.
-- `current_month.demand_charge_per_unit`: Rs/unit, e.g. `1.52`.
+- `current_month.wheeling_per_unit`: Rs/unit, e.g. `1.52` — read from the
+  bill's "Wheeling Charges" line's RATE (that line also prints a total
+  monthly amount, e.g. `2915.36`; not used). Do NOT confuse with the bill's
+  separate "Demand Charges" line (a different, fixed monthly charge based on
+  billed kVA) — that is never read, on purpose (solar doesn't avoid it).
+  (This field was named `demand_charge_per_unit` until real-bill testing
+  found that was the wrong label for the same already-correctly-captured
+  value — see "Extraction implementation notes" and Owner notes below.)
 - `current_month.fac`: Rs/unit, e.g. `0.20`.
-- `current_month.electricity_duty`: Rs/unit, e.g. `0`.
+- `current_month.electricity_duty`: Rs/unit, e.g. `0` — duty-exempt bills
+  correctly return `0` here (a confirmed value, never flagged for review),
+  not `null`. Only a genuinely unreadable duty line is `null`.
 - `current_month.tax_on_sale`: Rs/unit, e.g. `0.2894`.
 - `tod.t09_17.rate` can be negative — a daytime rebate, e.g. `-1.149`.
 - `tod.t17_24.rate` e.g. `1.915`.
@@ -116,14 +125,21 @@ Notes:
   `fac` may show as paise too. ALWAYS normalise every rate to Rs/unit before
   returning JSON. When in doubt, prefer the interpretation that keeps the
   value in a sane Rs/unit range (`energy_rate` ~6–9; `fac` / `electricity_duty`
-  / `tax_on_sale` / `demand_charge_per_unit` < 1). Concretely: if one of those
+  / `tax_on_sale` / `wheeling_per_unit` < 1). Concretely: if one of those
   four small-rate fields comes out > 5, it was almost certainly left in
   paise — divide by 100. The confirm screen is the backstop for anything this
   heuristic gets wrong.
-- **`demand_charge_per_unit`.** If the bill shows a total "Demand Charges"
-  amount and a billed demand in kVA (not a per-unit rate), derive per-unit as
-  `demand_charges_total / total_units`. Prefer a directly-printed per-unit
-  rate if present.
+- **`wheeling_per_unit`.** Read from the bill's "Wheeling Charges" line,
+  which prints BOTH a per-unit rate and a total monthly amount — use the
+  rate; only derive `wheeling_total / total_units` if no rate is printed.
+  Do NOT read the bill's separate "Demand Charges" line for this (a
+  different, fixed monthly charge based on billed kVA — always ignored,
+  deliberately, since solar doesn't avoid it).
+- **`electricity_duty` exemption.** Some industrial bills are duty-exempt
+  and print the duty line as `0.00` or "Exempt" — return `0` (a confirmed
+  value) in that case, never `null`, and never flag it for review. Only a
+  bill where the duty line genuinely can't be read at all should produce
+  `null`.
 - **TOD slot rates can be negative** (daytime rebate). Preserve the sign —
   never take an absolute value.
 - **`billing_history_units`.** The MSEDCL bill has a "Billing History" table
@@ -213,12 +229,16 @@ it, per `extraction_hardening.md`.
    every rule in `extraction_hardening.md`'s "VALIDATION RULES" —
    range checks (`energy_rate` 3–12, the four small rate fields 0–2/0–3, each
    ToD rate -5–5, `total_units` 100–1,000,000, `contract_demand_kva` 1–5,000),
-   the paise-not-converted cross-check (any of `fac` / `electricity_duty` /
-   `tax_on_sale` / `demand_charge_per_unit` > 5 → flag it and offer the ÷100
-   value as `suggested_corrections`), the ToD-units-reconcile cross-check
+   the paise-not-converted cross-check (any of `fac` / `tax_on_sale` /
+   `wheeling_per_unit` > 5 → flag it and offer the ÷100 value as
+   `suggested_corrections`), the ToD-units-reconcile cross-check
    (±3% of `total_units`), billing-history plausibility (4–12 entries, each
    within 3× the median), and the daytime-rate-sign check (`t09_17.rate`
-   positive & > 0.5 is flagged, never auto-changed). A field is
+   positive & > 0.5 is flagged, never auto-changed). `electricity_duty` gets
+   its own rule instead of the generic paise check: a confirmed `0`
+   (duty-exempt bill) is never flagged, even if the model added it to
+   `low_confidence_fields` out of caution — only `null` or an out-of-range
+   value flags. A field is
    `needs_review` if it's `null`, fails a check above, or the vision model
    itself listed it in `low_confidence_fields` (fuzzy-matched — the model
    isn't given a strict path grammar). Overall `quality` is `"poor"` when
@@ -325,11 +345,14 @@ reads every one of them from config.
 
 ```
 EFFECTIVE_TARIFF (Rs/unit) =
-    energy_rate + demand_charge_per_unit + fac + electricity_duty + tax_on_sale
+    energy_rate + wheeling_per_unit + fac + electricity_duty + tax_on_sale
     - GSC + tod.t09_17.rate
 
   // Worked example from the reference customer:
   // 7.66 + 1.52 + 0.20 + 0 + 0.2894 - 1.96 + (-1.149) = 6.5604
+  // (wheeling_per_unit was named demand_charge_per_unit until real-bill
+  // testing found that was the wrong label for this same, already-correctly-
+  // captured value — pure rename, this formula and its result are unchanged)
 
 DAYTIME_FRACTION = (tod.t06_09.units + tod.t09_17.units) / current_month.total_units
 
@@ -359,7 +382,7 @@ EX_GST_CAPITAL    = GROSS_COST   // returns are computed on ex-GST (ITC
 returning a garbage system size or tariff if:
 - `total_units` is missing/zero,
 - any of the five tariff-rate components (`energy_rate`,
-  `demand_charge_per_unit`, `fac`, `electricity_duty`, `tax_on_sale`) is
+  `wheeling_per_unit`, `fac`, `electricity_duty`, `tax_on_sale`) is
   missing,
 - `tod.t09_17.rate` or `tod.t09_17.units` is missing, or (when
   `daytime_window` is the default `"06-17"`) `tod.t06_09.units` is missing,
@@ -1550,8 +1573,10 @@ success" report ever comes up for either of them.
   `api/extract.php`, confirm-screen field in `app.js`, `deriveCommercial()`
   in `formulation.js`, narrative prose in `app.js`/`report.js`) — `wheeling`
   is the only field for this line, used directly (no ÷ units). Industrial's
-  `demand_charge_per_unit` is a real, separate, correctly-Rs/unit field and
-  was NOT touched anywhere.
+  `demand_charge_per_unit` was a real, separate, correctly-Rs/unit field and
+  was NOT touched in THIS task — **update: it turned out to be mislabelled
+  too, fixed in a follow-up task, renamed to `wheeling_per_unit`; see the
+  next Owner note below.**
   - **Effective tariff changed**: `10.22545` -> `10.0621` for the reference
     bill (delta `-0.16335`) — see "Commercial formulation" above for the
     corrected formula and worked example. Sizing/pricing (`offered_kwp`,
@@ -1590,3 +1615,65 @@ success" report ever comes up for either of them.
     `tariff_breakdown` and a hand-computed check of the new
     `effective_tariff`. Not re-tested in a live browser or against a real
     commercial bill photo — same standing caveat as the original task.
+- **Industrial wheeling/demand_charge correction (most recent task)**: same
+  mislabelling bug, found on the INDUSTRIAL path this time by testing
+  against a real MSEDCL industrial bill. The field captured as
+  `current_month.demand_charge_per_unit` was actually the bill's "Wheeling
+  Charges" line's RATE — correctly captured (industrial already treated it
+  as Rs/unit added straight into `effective_tariff`, no division bug like
+  commercial had), just wrongly named. Renamed to `wheeling_per_unit`
+  everywhere: `blank_extraction()`, `canonical_field_paths()`,
+  `validate_extraction()`, `vision_output_schema()`, `vision_prompt()`,
+  `sanitize_extraction()`, AND `parse_bill_text()`'s free-text-layer regex
+  parser in `api/extract.php`; `deriveIndustrial()` in `formulation.js`;
+  the confirm-screen field and narrative prose in `app.js`; the PDF
+  narrative in `report.js`. Pure rename — the arithmetic is byte-identical,
+  verified against SPEC.md's own reference example (`6.5604`, unchanged)
+  in the same kind of scratchpad Node harness as the commercial task.
+  - **The real bill also clarified something the regex parser had backwards**:
+    `parse_bill_text()`'s free text-layer fast path (used only for a clean
+    text-layer PDF, gated behind an all-fields-must-pass-validation check)
+    was searching bill text for a label matching `Demand\s*Charg(?:es|e)` —
+    i.e. it was hunting for the very line this task says must NEVER be
+    read (a separate, genuine "Demand Charges" line — a fixed monthly
+    charge based on billed kVA that solar doesn't avoid). Not explicitly
+    asked for in this task's file list, but left unfixed it would have
+    reintroduced exactly the bug being fixed on the vision path, so the
+    regex now searches for `Wheeling\s*Charg(?:es|e)` instead (same
+    rate-then-total-amount fallback structure, just retargeted). This path
+    has never been exercised against a real bill's text layer in this
+    sandbox (same standing caveat as `extraction_hardening.md`'s original
+    note on it) — worth a real test if a clean-text-layer industrial PDF is
+    ever available.
+  - **Vision prompt now explicitly separates the two lines**: tells the
+    model to read the RATE (not the total amount) off "Wheeling Charges",
+    and to never read "Demand Charges" for anything. Also adds an explicit
+    duty-exemption rule: a bill printing `0.00`/"Exempt" for
+    `electricity_duty` should return `0` (confirmed), not `null`, and
+    should NOT be added to `low_confidence_fields` for a clean zero.
+  - **Validation code change for duty=0**: pulled `electricity_duty` out of
+    the generic small-rate-fields paise-check loop into its own rule —
+    `null` or out-of-range still flags, but an exact `0` is now NEVER
+    flagged even if the model itself added it to `low_confidence_fields`
+    (a confirmed exempt reading shouldn't get second-guessed by the
+    model's own caution). Caught and fixed one bug while writing this:
+    the first draft used `$duty !== 0.0` (PHP strict comparison — an int
+    `0` from `json_decode` is `!==` a float `0.0`, so a JSON `"electricity_
+    duty": 0` would have silently failed to get the treatment intended);
+    changed to the loose `$duty != 0`, which is type-independent, before
+    this shipped. Neither this nor the prompt change has been tested
+    against a real duty-exempt bill — logic verified by reading and a
+    quick mental trace, not run end-to-end.
+  - **Legacy read-side fallback**: `deriveIndustrial()` now does
+    `wheelingPerUnit = !isMissing(cm.wheeling_per_unit) ? cm.wheeling_per_unit
+    : cm.demand_charge_per_unit` before validating — same pattern, same
+    caveats (graceful, not retroactively-correcting) as commercial's
+    fallback. Verified in the harness with both a fresh (`wheeling_per_unit`)
+    and a legacy-shaped (`demand_charge_per_unit`) input producing the same
+    `6.5604`. Same "no live code path currently re-feeds an archived
+    `extracted` row back into this function" caveat applies here too.
+  - Commercial path untouched, as instructed — grepped to confirm every
+    remaining `demand_charge`/`wheeling` reference outside this rename's own
+    explanatory comments belongs to either commercial's own (already-fixed)
+    `wheeling` field or is industrial's `wheeling_per_unit` in its new,
+    correct place.

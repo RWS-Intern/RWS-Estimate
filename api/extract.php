@@ -159,7 +159,7 @@ function blank_extraction() {
         'current_month' => array(
             'total_units' => null,
             'energy_rate' => null,
-            'demand_charge_per_unit' => null,
+            'wheeling_per_unit' => null,
             'fac' => null,
             'electricity_duty' => null,
             'tax_on_sale' => null,
@@ -184,7 +184,7 @@ function canonical_field_paths() {
         'consumer_number', 'consumer_name', 'tariff_category', 'tariff_code',
         'contract_demand_kva', 'sanctioned_load_kw',
         'current_month.total_units', 'current_month.energy_rate',
-        'current_month.demand_charge_per_unit', 'current_month.fac',
+        'current_month.wheeling_per_unit', 'current_month.fac',
         'current_month.electricity_duty', 'current_month.tax_on_sale',
     );
     foreach (TOD_SLOT_KEYS as $slot) {
@@ -252,14 +252,15 @@ function validate_extraction($data, $modelFlags = array()) {
     $flag('current_month.total_units', !in_range($cm['total_units'], 100, 1000000) && $cm['total_units'] !== null, $cm['total_units']);
     $flag('current_month.energy_rate', !in_range($cm['energy_rate'], 3, 12) && $cm['energy_rate'] !== null, $cm['energy_rate']);
 
-    // The four small rate fields also get the paise-not-converted detector:
-    // if the value is > 5 it was almost certainly left in paise (SPEC.md /
+    // The small rate fields also get the paise-not-converted detector: if
+    // the value is > 5 it was almost certainly left in paise (SPEC.md /
     // extraction_hardening.md). Offer the ÷100 value as a one-tap fix rather
-    // than silently rewriting what the user sees.
+    // than silently rewriting what the user sees. electricity_duty is
+    // handled separately below (a confirmed 0 — duty-exempt bills exist —
+    // must never be flagged, unlike these three).
     $paiseRanges = array(
-        'current_month.demand_charge_per_unit' => array(0, 3),
+        'current_month.wheeling_per_unit' => array(0, 3),
         'current_month.fac' => array(0, 2),
-        'current_month.electricity_duty' => array(0, 2),
         'current_month.tax_on_sale' => array(0, 2),
     );
     foreach ($paiseRanges as $path => $range) {
@@ -270,6 +271,19 @@ function validate_extraction($data, $modelFlags = array()) {
         if ($v !== null && $v > 5) {
             $sugg[$path] = suggest_paise_correction($v);
         }
+    }
+
+    // electricity_duty: some industrial bills are duty-exempt and correctly
+    // print/return 0 — that is a CONFIRMED value, not an uncertain one, so
+    // it must never trigger the amber "please check" flag, even if the
+    // model itself added it to low_confidence_fields out of caution. A
+    // genuinely missing (null) or out-of-range duty still flags normally.
+    $duty = $cm['electricity_duty'];
+    $dutyFailed = ($duty !== null && !in_range($duty, 0, 2));
+    $nr['current_month.electricity_duty'] = ($duty === null) || $dutyFailed ||
+        ($duty != 0 && model_flagged('current_month.electricity_duty', $modelFlags));
+    if ($duty !== null && $duty > 5) {
+        $sugg['current_month.electricity_duty'] = suggest_paise_correction($duty);
     }
 
     foreach (TOD_SLOT_KEYS as $slot) {
@@ -430,11 +444,15 @@ function parse_bill_text($text) {
     $cm['total_units'] = find_number($text, 'Total\s*(?:Units|Consumption)\s*[:\-]?\s*');
     $cm['energy_rate'] = find_number($text, 'Energy\s*Charg(?:es|e)\s*(?:@|Rate)?\s*[:\-]?\s*');
 
-    $cm['demand_charge_per_unit'] = find_number($text, 'Demand\s*Charg(?:es|e)\s*(?:@|Rate|per\s*unit)\s*[:\-]?\s*');
-    if ($cm['demand_charge_per_unit'] === null) {
-        $demandTotal = find_number($text, 'Demand\s*Charg(?:es|e)\s*(?:Amount)?\s*[:\-]?\s*(?:Rs\.?|₹)?\s*');
-        if ($demandTotal !== null && $cm['total_units']) {
-            $cm['demand_charge_per_unit'] = round($demandTotal / $cm['total_units'], 4);
+    // "Wheeling Charges" — NOT "Demand Charges" (a separate, fixed monthly
+    // charge based on billed kVA that we deliberately never read; solar
+    // doesn't avoid it, and mixing it in here was the original bug this
+    // field's demand_charge_per_unit -> wheeling_per_unit rename fixed).
+    $cm['wheeling_per_unit'] = find_number($text, 'Wheeling\s*Charg(?:es|e)\s*(?:@|Rate|per\s*unit)\s*[:\-]?\s*');
+    if ($cm['wheeling_per_unit'] === null) {
+        $wheelingTotal = find_number($text, 'Wheeling\s*Charg(?:es|e)\s*(?:Amount)?\s*[:\-]?\s*(?:Rs\.?|₹)?\s*');
+        if ($wheelingTotal !== null && $cm['total_units']) {
+            $cm['wheeling_per_unit'] = round($wheelingTotal / $cm['total_units'], 4);
         }
     }
 
@@ -839,7 +857,7 @@ function vision_output_schema() {
                 'properties' => array(
                     'total_units' => array('type' => array('number', 'null')),
                     'energy_rate' => array('type' => array('number', 'null')),
-                    'demand_charge_per_unit' => array('type' => array('number', 'null')),
+                    'wheeling_per_unit' => array('type' => array('number', 'null')),
                     'fac' => array('type' => array('number', 'null')),
                     'electricity_duty' => array('type' => array('number', 'null')),
                     'tax_on_sale' => array('type' => array('number', 'null')),
@@ -855,7 +873,7 @@ function vision_output_schema() {
                         'additionalProperties' => false,
                     ),
                 ),
-                'required' => array('total_units', 'energy_rate', 'demand_charge_per_unit', 'fac', 'electricity_duty', 'tax_on_sale', 'tod'),
+                'required' => array('total_units', 'energy_rate', 'wheeling_per_unit', 'fac', 'electricity_duty', 'tax_on_sale', 'tod'),
                 'additionalProperties' => false,
             ),
             'billing_history_units' => array('type' => 'array', 'items' => array('type' => 'number')),
@@ -891,7 +909,7 @@ Return ONLY a single JSON object, no prose, no markdown fences, exactly this sha
   "current_month": {
     "total_units": number|null,
     "energy_rate": number|null,
-    "demand_charge_per_unit": number|null,
+    "wheeling_per_unit": number|null,
     "fac": number|null,
     "electricity_duty": number|null,
     "tax_on_sale": number|null,
@@ -907,17 +925,28 @@ Return ONLY a single JSON object, no prose, no markdown fences, exactly this sha
 }
 
 Rules:
-- All rate fields (energy_rate, demand_charge_per_unit, fac, electricity_duty,
+- All rate fields (energy_rate, wheeling_per_unit, fac, electricity_duty,
   tax_on_sale, and every tod rate) MUST be in RUPEES PER UNIT. MSEDCL prints some
   of these in "Ps/U" (paise per unit). If a value is labelled Ps/U or paise,
   DIVIDE BY 100. Example: "Tax on Sale @ 28.94 Ps/U" -> 0.2894. "FAC @ 20 Ps/U"
-  -> 0.20. Sanity: energy_rate is normally 5–10; fac/duty/tax/demand-per-unit are
-  normally well below 1.
+  -> 0.20. Sanity: energy_rate is normally 5–10; fac/duty/tax/wheeling-per-unit
+  are normally well below 1.
 - energy_rate is the base energy charge rate for the current month's units (the
   "Energy Charges" rate, or the industrial/commercial consumption rate).
-- demand_charge_per_unit: if only a total "Demand Charges" amount is printed,
-  divide it by total_units to get a per-unit figure; otherwise use the printed
-  per-unit rate.
+- wheeling_per_unit: read the RATE from the bill's "Wheeling Charges" line —
+  that line prints TWO numbers, a small per-unit rate (e.g. 1.52) and a total
+  monthly amount (e.g. 2915.36). Use the RATE, not the amount. If only the
+  total amount is printed (no rate), divide it by total_units yourself. Do
+  NOT read the bill's separate "Demand Charges" line for this field — Demand
+  Charges is a different, fixed monthly charge (based on billed kVA, not
+  units) and must be ignored entirely; it is never used anywhere in this
+  extraction.
+- electricity_duty: some industrial bills are duty-exempt and print the duty
+  rate or amount as "0.00", "0", or "Exempt". In that case return 0 (a
+  confirmed, confident value) — do NOT return null and do NOT add
+  "current_month.electricity_duty" to low_confidence_fields for a clearly
+  printed zero/exempt. Only use null (and flag it) if the duty line truly
+  cannot be read at all.
 - The four TOD (Time of Day) slots are 00:00–06:00, 06:00–09:00, 09:00–17:00,
   17:00–24:00. Each has its own units and its own rate. RATES CAN BE NEGATIVE
   (the daytime 09:00–17:00 slot is usually a rebate, e.g. -1.149). Preserve the
@@ -953,7 +982,7 @@ function sanitize_extraction($data) {
 
     $cmIn = isset($data['current_month']) && is_array($data['current_month']) ? $data['current_month'] : array();
     $cm = &$out['current_month'];
-    foreach (array('total_units', 'energy_rate', 'demand_charge_per_unit', 'fac', 'electricity_duty', 'tax_on_sale') as $k) {
+    foreach (array('total_units', 'energy_rate', 'wheeling_per_unit', 'fac', 'electricity_duty', 'tax_on_sale') as $k) {
         if (isset($cmIn[$k]) && is_numeric($cmIn[$k])) $cm[$k] = (float) $cmIn[$k];
     }
 

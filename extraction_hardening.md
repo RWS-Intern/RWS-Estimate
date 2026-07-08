@@ -66,7 +66,7 @@ Return ONLY a single JSON object, no prose, no markdown fences, exactly this sha
   "current_month": {
     "total_units": number|null,
     "energy_rate": number|null,
-    "demand_charge_per_unit": number|null,
+    "wheeling_per_unit": number|null,
     "fac": number|null,
     "electricity_duty": number|null,
     "tax_on_sale": number|null,
@@ -82,17 +82,29 @@ Return ONLY a single JSON object, no prose, no markdown fences, exactly this sha
 }
 
 Rules:
-- All rate fields (energy_rate, demand_charge_per_unit, fac, electricity_duty,
+- All rate fields (energy_rate, wheeling_per_unit, fac, electricity_duty,
   tax_on_sale, and every tod rate) MUST be in RUPEES PER UNIT. MSEDCL prints some
   of these in "Ps/U" (paise per unit). If a value is labelled Ps/U or paise,
   DIVIDE BY 100. Example: "Tax on Sale @ 28.94 Ps/U" -> 0.2894. "FAC @ 20 Ps/U"
-  -> 0.20. Sanity: energy_rate is normally 5–10; fac/duty/tax/demand-per-unit are
-  normally well below 1.
+  -> 0.20. Sanity: energy_rate is normally 5–10; fac/duty/tax/wheeling-per-unit
+  are normally well below 1.
 - energy_rate is the base energy charge rate for the current month's units (the
   "Energy Charges" rate, or the industrial/commercial consumption rate).
-- demand_charge_per_unit: if only a total "Demand Charges" amount is printed,
-  divide it by total_units to get a per-unit figure; otherwise use the printed
-  per-unit rate.
+- wheeling_per_unit: read the RATE from the bill's "Wheeling Charges" line —
+  that line prints TWO numbers, a small per-unit rate (e.g. 1.52) and a total
+  monthly amount (e.g. 2915.36). Use the RATE, not the amount. If only the
+  total amount is printed (no rate), divide it by total_units yourself. Do
+  NOT read the bill's separate "Demand Charges" line for this field — Demand
+  Charges is a different, fixed monthly charge (based on billed kVA, not
+  units) and must be ignored entirely; it is never used anywhere in this
+  extraction. (This field was named demand_charge_per_unit until real-bill
+  testing found that was the wrong label for it — see SPEC.md's Owner notes.)
+- electricity_duty: some industrial bills are duty-exempt and print the duty
+  rate or amount as "0.00", "0", or "Exempt". In that case return 0 (a
+  confirmed, confident value) — do NOT return null and do NOT add
+  "current_month.electricity_duty" to low_confidence_fields for a clearly
+  printed zero/exempt. Only use null (and flag it) if the duty line truly
+  cannot be read at all.
 - The four TOD (Time of Day) slots are 00:00–06:00, 06:00–09:00, 09:00–17:00,
   17:00–24:00. Each has its own units and its own rate. RATES CAN BE NEGATIVE
   (the daytime 09:00–17:00 slot is usually a rebate, e.g. -1.149). Preserve the
@@ -114,18 +126,23 @@ Rules:
 
 Ranges (flag if outside):
 - `energy_rate`            : 3 – 12
-- `demand_charge_per_unit` : 0 – 3
+- `wheeling_per_unit`      : 0 – 3
 - `fac`                    : 0 – 2
-- `electricity_duty`       : 0 – 2
+- `electricity_duty`       : 0 – 2 (an exact `0` is NEVER flagged, even if
+                             the model added it to low_confidence_fields —
+                             duty-exempt bills are a confirmed, valid `0`;
+                             only `null`/out-of-range flags)
 - `tax_on_sale`            : 0 – 2
 - each `tod.*.rate`        : -5 – 5
 - `total_units`            : 100 – 1,000,000
 - `contract_demand_kva`    : 1 – 5,000
 
 Cross-checks (flag the involved fields if they fail):
-- **Paise-not-converted detector:** if any of fac / duty / tax_on_sale /
-  demand_charge_per_unit is > 5, it was almost certainly left in paise. Flag it,
+- **Paise-not-converted detector:** if any of fac / tax_on_sale /
+  wheeling_per_unit is > 5, it was almost certainly left in paise. Flag it,
   and offer the ÷100 value as a suggested correction on the confirm screen.
+  (`electricity_duty` is excluded from this detector — see its own rule
+  above.)
 - **TOD units reconcile:** sum(tod.t00_06.units, t06_09, t09_17, t17_24) should be
   within ±3% of total_units. If not, flag total_units and all four slot units.
 - **History plausibility:** billing_history_units should be 4–12 entries, all

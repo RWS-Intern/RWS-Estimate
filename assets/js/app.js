@@ -533,7 +533,7 @@
       consumer_number: null, consumer_name: null, tariff_category: null,
       tariff_code: null, contract_demand_kva: null, sanctioned_load_kw: null,
       current_month: {
-        total_units: null, energy_rate: null, demand_charge_per_unit: null,
+        total_units: null, energy_rate: null, wheeling_per_unit: null,
         fac: null, electricity_duty: null, tax_on_sale: null,
         tod: {
           t00_06: { units: null, rate: null }, t06_09: { units: null, rate: null },
@@ -649,7 +649,7 @@
     var specs = [
       { path: "current_month.total_units", label: "Total units this month", value: cm.total_units },
       { path: "current_month.energy_rate", label: "Energy rate (Rs/unit)", value: cm.energy_rate },
-      { path: "current_month.demand_charge_per_unit", label: "Demand charge (Rs/unit)", value: cm.demand_charge_per_unit },
+      { path: "current_month.wheeling_per_unit", label: "Wheeling charge (Rs/unit)", value: cm.wheeling_per_unit },
       { path: "current_month.fac", label: "FAC (Rs/unit)", value: cm.fac },
       { path: "current_month.electricity_duty", label: "Electricity duty (Rs/unit)", value: cm.electricity_duty },
       { path: "current_month.tax_on_sale", label: "Tax on sale (Rs/unit)", value: cm.tax_on_sale }
@@ -657,7 +657,7 @@
     var idFor = {
       "current_month.total_units": "c-total_units",
       "current_month.energy_rate": "c-energy_rate",
-      "current_month.demand_charge_per_unit": "c-demand_charge_per_unit",
+      "current_month.wheeling_per_unit": "c-wheeling_per_unit",
       "current_month.fac": "c-fac",
       "current_month.electricity_duty": "c-electricity_duty",
       "current_month.tax_on_sale": "c-tax_on_sale"
@@ -870,7 +870,7 @@
     return {
       total_units: numOrNull("c-total_units"),
       energy_rate: numOrNull("c-energy_rate"),
-      demand_charge_per_unit: numOrNull("c-demand_charge_per_unit"),
+      wheeling_per_unit: numOrNull("c-wheeling_per_unit"),
       fac: numOrNull("c-fac"),
       electricity_duty: numOrNull("c-electricity_duty"),
       tax_on_sale: numOrNull("c-tax_on_sale"),
@@ -988,8 +988,8 @@
       : "+ daytime ToD charge <b>₹" + tb.daytime_tod_rate.toFixed(2) + "</b>";
     document.getElementById("d_why_rate_h").textContent = "2 · Per-unit value → ₹" + formulation.effective_tariff.toFixed(2) + "/unit";
     document.getElementById("d_why_rate_p").innerHTML =
-      "Built bottom-up from your tariff: base energy <b>₹" + tb.energy_rate.toFixed(2) + "</b> + demand <b>₹" +
-      tb.demand_charge_per_unit.toFixed(2) + "</b> + FAC <b>₹" + tb.fac.toFixed(2) + "</b> + duty <b>₹" +
+      "Built bottom-up from your tariff: base energy <b>₹" + tb.energy_rate.toFixed(2) + "</b> + wheeling <b>₹" +
+      tb.wheeling_per_unit.toFixed(2) + "</b> + FAC <b>₹" + tb.fac.toFixed(2) + "</b> + duty <b>₹" +
       tb.electricity_duty.toFixed(2) + "</b> + tax-on-sale <b>₹" + tb.tax_on_sale.toFixed(2) + "</b> " + todTerm +
       " − Grid Support Charge <b>₹" + tb.gsc.toFixed(2) + "</b> = <b>₹" + formulation.effective_tariff.toFixed(2) +
       "/unit</b> — the real value each solar unit offsets, net of the ToD rebate and the GSC.";

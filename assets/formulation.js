@@ -6,11 +6,15 @@
  * SPEC.md's "Formulas" section. Pure functions — no DOM, no fetch.
  *
  * Two categories, two independent derivations:
- *   - deriveIndustrial() — MSEDCL industrial bills, ToD-slot sizing. This is
- *     the ORIGINAL derive() body, untouched byte-for-byte (see SPEC.md's
- *     defensive-guard notes) — only its three new return keys
- *     (rate_per_kwp/gst_rate/category) were added, so every pre-existing
- *     consumer of its output sees bit-identical numbers.
+ *   - deriveIndustrial() — MSEDCL industrial bills, ToD-slot sizing. This
+ *     was the ORIGINAL derive() body, untouched byte-for-byte apart from
+ *     two additive changes: the three new return keys (rate_per_kwp/
+ *     gst_rate/category), and a pure rename of demand_charge_per_unit ->
+ *     wheeling_per_unit (real-bill testing found that field was actually
+ *     the bill's Wheeling Charges rate under the wrong label — same MATH,
+ *     value flows into effective_tariff exactly as before, just a renamed
+ *     input/output key; verified bit-identical against SPEC.md's reference
+ *     example, see that section's Owner notes).
  *   - deriveCommercial() — MSEDCL commercial bills, which split
  *     wheeling/duty/ToD-rebate/GSC as their own line items instead of a
  *     per-slot ToD table, and size against a solar-hour-share assumption
@@ -68,14 +72,21 @@
       throw new Error(INCONSISTENT_MESSAGE);
     }
 
+    // Legacy read-side fallback: rows extracted/confirmed before the
+    // demand_charge_per_unit -> wheeling_per_unit rename used the old key
+    // for the same bill line (the "Wheeling Charges" rate) under the wrong
+    // label — same value, same treatment, just renamed.
+    var wheelingPerUnit = !isMissing(cm.wheeling_per_unit) ? cm.wheeling_per_unit : cm.demand_charge_per_unit;
+
     // Every one of these feeds effective_tariff or daytime_fraction below
     // via plain `+`/`-` arithmetic, where a missing (null) operand would
     // silently coerce to zero in JS rather than fail — guard explicitly so
     // an incomplete manual entry produces a clear error, not a wrong number.
-    var rateFields = ["energy_rate", "demand_charge_per_unit", "fac", "electricity_duty", "tax_on_sale"];
+    var rateFields = ["energy_rate", "fac", "electricity_duty", "tax_on_sale"];
     for (var i = 0; i < rateFields.length; i++) {
       if (isMissing(cm[rateFields[i]])) throw new Error(INCONSISTENT_MESSAGE);
     }
+    if (isMissing(wheelingPerUnit)) throw new Error(INCONSISTENT_MESSAGE);
     if (isMissing(cm.tod.t09_17.rate) || isMissing(cm.tod.t09_17.units)) {
       throw new Error(INCONSISTENT_MESSAGE);
     }
@@ -93,7 +104,7 @@
 
     var tod = cm.tod;
     var effectiveTariff =
-      cm.energy_rate + cm.demand_charge_per_unit + cm.fac + cm.electricity_duty +
+      cm.energy_rate + wheelingPerUnit + cm.fac + cm.electricity_duty +
       cm.tax_on_sale - config.gsc + tod.t09_17.rate;
 
     var history = Array.isArray(confirmed.billing_history_units) ? confirmed.billing_history_units : [];
@@ -137,7 +148,7 @@
       // effective_tariff so the confirm/dashboard prose can show its math.
       tariff_breakdown: {
         energy_rate: cm.energy_rate,
-        demand_charge_per_unit: cm.demand_charge_per_unit,
+        wheeling_per_unit: wheelingPerUnit,
         fac: cm.fac,
         electricity_duty: cm.electricity_duty,
         tax_on_sale: cm.tax_on_sale,

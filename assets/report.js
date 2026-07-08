@@ -480,7 +480,7 @@
       cardB: {
         title: "2 · Per-unit value -> ₹" + formulation.effective_tariff.toFixed(2) + "/unit",
         body: "Built bottom-up from your tariff: base energy ₹" + itb.energy_rate.toFixed(2) +
-          " + demand ₹" + itb.demand_charge_per_unit.toFixed(2) + " + FAC ₹" + itb.fac.toFixed(2) +
+          " + wheeling ₹" + itb.wheeling_per_unit.toFixed(2) + " + FAC ₹" + itb.fac.toFixed(2) +
           " + duty ₹" + itb.electricity_duty.toFixed(2) + " + tax-on-sale ₹" + itb.tax_on_sale.toFixed(2) +
           " " + todTerm + " - Grid Support Charge ₹" + itb.gsc.toFixed(2) + " = ₹" +
           formulation.effective_tariff.toFixed(2) + "/unit — the real value each solar unit offsets, net of the ToD rebate and the GSC."
