@@ -34,7 +34,8 @@
         { key: "amc_esc", label: "AMC escalation", hint: "fraction per year, e.g. 0.01 = 1%/yr", type: "fraction" },
         { key: "spares_on", label: "Spares & replacements included", hint: "turns the spares cost line in the 25-year table on/off", type: "bool" },
         { key: "spares_rate_per_kwp", label: "Spares rate", hint: "Rs per kWp", type: "number", min: 0 },
-        { key: "spares_base_rate", label: "Spares base rate", hint: "Rs, flat component of the spares cost", type: "number", min: 0 }
+        { key: "spares_base_rate", label: "Spares base rate", hint: "Rs, flat component of the spares cost", type: "number", min: 0 },
+        { key: "insurance_rate_pct", label: "Insurance rate", hint: "%, e.g. 0.33 = 0.33% of net project cost (incl. GST), charged flat every year — no escalation, unlike AMC", type: "number", min: 0, max: 100 }
       ]
     },
     {

@@ -74,6 +74,11 @@
       netCost = grossCost + gstAmt, exGst = grossCost;
     var amc1 = lock.size * config.amc_rate_per_kwp, sparesEvt = lock.size * config.spares_rate_per_kwp,
       tax = scenario.tax / 100;
+    // Insurance: % of net project cost (incl. GST), FLAT every year — no
+    // escalation, unlike AMC (which grows via amc_esc). A fixed constant
+    // computed once, reused for all 25 rows.
+    var insuranceRatePct = (typeof config.insurance_rate_pct === "number") ? config.insurance_rate_pct : 0;
+    var insurance = netCost * (insuranceRatePct / 100);
     var loanAmt = scenario.loan ? (1 - scenario.dp / 100) * exGst : 0,
       downPay = scenario.loan ? (scenario.dp / 100) * exGst : exGst;
     var emi = (scenario.loan && loanAmt > 0) ? pmt(scenario.rate / 100 / 12, scenario.ten, loanAmt) : 0,
@@ -103,14 +108,14 @@
       var isSp = (config.spares_on && (y === 6 || y === 11 || y === 16 || y === 21));
       var spares = isSp ? sparesEvt : 0;
       var sparesCM = isSp ? lock.size * config.spares_base_rate : 0;
-      var oper = gross - amc + depBen - spares;
-      var operCM = gross - amc + depBen - sparesCM;
+      var oper = gross - amc - insurance + depBen - spares;
+      var operCM = gross - amc - insurance + depBen - sparesCM;
       var prevP = P; P = (y === 1 ? -exGst : prevP) + operCM;
       var interest = (y === 1) ? 0 : (P >= 1 ? P * config.int_surplus : 0);
       var net = (y === 1 ? -exGst : 0) + oper + interest;
       var emiPaid = emiYear[y] || 0, upfront = (y === 1) ? (downPay + procFee) : 0, finNet = oper - emiPaid - upfront;
       rows.push({
-        y: y, rate: rate, gen: gen, gross: gross, amc: amc, fin: 0, depBen: depBen,
+        y: y, rate: rate, gen: gen, gross: gross, amc: amc, insurance: insurance, fin: 0, depBen: depBen,
         spares: spares, interest: interest, oper: oper, net: net, emiPaid: emiPaid, finNet: finNet
       });
     }
@@ -124,8 +129,12 @@
     var irrV = irr(netArr), finIrr = irr(finArr), npvV = npv(config.discount, netArr);
     var energy = rows.reduce(function (a, r) { return a + r.gen; }, 0),
       sumAMC = rows.reduce(function (a, r) { return a + r.amc; }, 0),
-      sumSp = rows.reduce(function (a, r) { return a + r.spares; }, 0);
-    var lcoe = (netCost + sumAMC + sumSp) / energy;
+      sumSp = rows.reduce(function (a, r) { return a + r.spares; }, 0),
+      sumInsurance = rows.reduce(function (a, r) { return a + r.insurance; }, 0);
+    // LCOE = every lifetime cost (capital + AMC + spares + insurance) ÷
+    // lifetime energy — insurance is a real recurring cost like AMC/spares,
+    // so it belongs in this total the same way.
+    var lcoe = (netCost + sumAMC + sumSp + sumInsurance) / energy;
 
     var payback = null;
     for (var i = 0; i < rows.length; i++) {

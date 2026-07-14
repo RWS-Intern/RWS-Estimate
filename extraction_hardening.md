@@ -66,9 +66,10 @@ Return ONLY a single JSON object, no prose, no markdown fences, exactly this sha
   "sanctioned_load_unit": "kW"|"HP"|"kVA"|null,
   "current_month": {
     "total_units": number|null,
-    "energy_rate": number|null,
-    "wheeling_per_unit": number|null,
-    "fac": number|null,
+    "energy_total_amount": number|null,
+    "wheeling_total_amount": number|null,
+    "fac_total_amount": number|null,
+    "tod_ec_total": number|null,
     "duty_total_amount": number|null,
     "duty_rate_pct": number|null,
     "duty_per_unit": number|null,
@@ -85,23 +86,39 @@ Return ONLY a single JSON object, no prose, no markdown fences, exactly this sha
 }
 
 Rules:
-- All rate fields (energy_rate, wheeling_per_unit, fac, duty_per_unit,
-  tax_on_sale, and every tod rate) MUST be in RUPEES PER UNIT. MSEDCL prints some
-  of these in "Ps/U" (paise per unit). If a value is labelled Ps/U or paise,
-  DIVIDE BY 100. Example: "Tax on Sale @ 28.94 Ps/U" -> 0.2894. "FAC @ 20 Ps/U"
-  -> 0.20. Sanity: energy_rate is normally 5–10; fac/tax/wheeling-per-unit/
+- All PER-UNIT rate fields still in this shape (duty_per_unit, tax_on_sale,
+  and every tod rate) MUST be in RUPEES PER UNIT. MSEDCL prints some of these
+  in "Ps/U" (paise per unit). If a value is labelled Ps/U or paise, DIVIDE BY
+  100. Example: "Tax on Sale @ 28.94 Ps/U" -> 0.2894. Sanity: tax_on_sale/
   duty_per_unit are normally well below 1.
-- energy_rate is the base energy charge rate for the current month's units (the
-  "Energy Charges" rate, or the industrial/commercial consumption rate).
-- wheeling_per_unit: read the RATE from the bill's "Wheeling Charges" line —
-  that line prints TWO numbers, a small per-unit rate (e.g. 1.52) and a total
-  monthly amount (e.g. 2915.36). Use the RATE, not the amount. If only the
-  total amount is printed (no rate), divide it by total_units yourself. Do
-  NOT read the bill's separate "Demand Charges" line for this field — Demand
-  Charges is a different, fixed monthly charge (based on billed kVA, not
-  units) and must be ignored entirely; it is never used anywhere in this
-  extraction. (This field was named demand_charge_per_unit until real-bill
-  testing found that was the wrong label for it — see SPEC.md's Owner notes.)
+- energy_total_amount / wheeling_total_amount / fac_total_amount / tod_ec_total:
+  copy the printed monthly TOTAL Rs AMOUNT for each of these charges EXACTLY
+  AS PRINTED — do NOT convert to a per-unit rate, do NOT divide by
+  total_units, do NOT do any arithmetic on them at all. All per-unit
+  derivation happens server-side, after extraction, per Rite Water's
+  official Solar Working Sheet formula (energy_per_unit = energy_total /
+  total_units, etc. — see SPEC.md's "Formulas" section). This replaced an
+  earlier per-unit-rate extraction (energy_rate/wheeling_per_unit/fac) once
+  the workbook alignment task required deriving these from their TOTALS, not
+  a model-read rate — same rationale as the duty split below: model-side
+  arithmetic on these values was a source of nondeterminism, so the model
+  now only ever copies a printed total.
+    - energy_total_amount: the bill's "Energy Charges" TOTAL amount for the
+      current month's units, verbatim.
+    - wheeling_total_amount: the bill's "Wheeling Charges" line TOTAL
+      monthly amount, verbatim (e.g. 6855.2). Do NOT read the bill's
+      separate "Demand Charges" line for this field — Demand Charges is a
+      different, fixed monthly charge (based on billed kVA, not units) and
+      must be ignored entirely; it is never used anywhere in this
+      extraction. (This field was named demand_charge_per_unit, then
+      wheeling_per_unit, until real-bill testing and then the workbook
+      alignment task changed both its label and its shape — see SPEC.md's
+      Owner notes.)
+    - fac_total_amount: the bill's "FAC" (Fuel Adjustment Charge) TOTAL
+      monthly amount, verbatim.
+    - tod_ec_total: the bill's "TOD Tariff EC" line TOTAL monthly amount,
+      verbatim. CAN BE NEGATIVE (it is usually a rebate, e.g. -57.83).
+      Preserve the sign exactly.
 - duty_total_amount / duty_rate_pct / duty_per_unit: MSEDCL industrial bills
   typically show duty in TWO places — a rate table with a line like "E.D. on
   (Rs.) / Rate %" (e.g. 7.50), and a billing-details line labelled
@@ -125,7 +142,15 @@ Rules:
   was nondeterministic — a later run of the SAME bill divided the printed
   7.50% rate by 100 instead of the total by units, producing a wrong value
   that happened to sit inside the plausible range with no flag raised. See
-  SPEC.md's Owner notes.)
+  SPEC.md's Owner notes.) Server-side, the final electricity_duty per-unit
+  value used in the tariff formula is now, by default, RECOMPUTED from
+  duty_rate_pct and the four totals above per the Solar Working Sheet
+  (`ROUND(duty_rate_pct/100 * (energy_total_amount+wheeling_total_amount+
+  fac_total_amount+tod_ec_total)/total_units, 4)`) — it does NOT use
+  duty_total_amount directly for the tariff calculation. duty_total_amount
+  is still extracted and shown for display/logging only; the bill-amount-
+  based resolution described above is now only a fallback for when the
+  workbook formula's inputs are incomplete.
 - The four TOD (Time of Day) slots are 00:00–06:00, 06:00–09:00, 09:00–17:00,
   17:00–24:00. Each has its own units and its own rate. RATES CAN BE NEGATIVE
   (the daytime 09:00–17:00 slot is usually a rebate, e.g. -1.149). Preserve the
@@ -144,7 +169,7 @@ Rules:
   and their units. Return the UNITS values, MOST RECENT FIRST, up to 12 numbers.
   Strip commas.
 - If any value is unclear, illegible, or you are guessing, put null for that field
-  and add its dotted path (e.g. "current_month.fac" or "tod.t09_17.rate") to
+  and add its dotted path (e.g. "current_month.fac_total_amount" or "tod.t09_17.rate") to
   low_confidence_fields. DO NOT invent numbers — a null the user can fill in is
   far better than a wrong value.
 - Strip thousands separators from all numbers. Return numbers as numbers, not
@@ -155,7 +180,10 @@ Rules:
 
 ## VALIDATION RULES (run after extraction; set needs_review per field)
 
-Ranges (flag if outside):
+Ranges (flag if outside; these apply to the server-derived per-unit values —
+`energy_rate`/`wheeling_per_unit`/`fac` — computed as total/total_units,
+not to the raw `*_total_amount` fields the model extracts, which have no
+natural per-unit range):
 - `energy_rate`            : 3 – 12
 - `wheeling_per_unit`      : 0 – 3
 - `fac`                    : 0 – 2

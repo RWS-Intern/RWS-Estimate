@@ -224,6 +224,12 @@ function blank_extraction() {
             'wheeling_per_unit' => null,
             'fac' => null,
             'electricity_duty' => null,
+            // Display/logging only — the tariff calc no longer uses this
+            // (see resolve_electricity_duty_workbook()); kept alongside the
+            // resolved per-unit value so the bill's actual charged duty
+            // amount stays visible somewhere, per this task's ask. Not
+            // itself validated/collected back from the confirm screen.
+            'duty_total_amount' => null,
             'tax_on_sale' => null,
             'tod' => array(
                 't00_06' => array('units' => null, 'rate' => null),
@@ -310,21 +316,24 @@ function suggest_per_unit_correction($v, $divisorUnits, $lo, $hi) {
 }
 
 /**
- * Deterministic priority-order derivation of the per-unit electricity duty
- * from THREE raw, verbatim-copied bill signals — replaces model-side
- * arithmetic entirely. Model-side conversion is nondeterministic: on a real
- * bill (Shriram Stone Crusher), one vision run divided the bill's printed
- * "E.D. on (Rs.) / Rate %" figure (7.50) by 100 -> 0.075, landing INSIDE
- * the 0-3 plausible band with no flag raised, instead of the correct
- * duty_total_amount / total_units = 4178.77 / 4510 = 0.9266. Only ever
- * called on FRESH extraction data (at least one of the three raw signals
- * present) — an old-shaped row/replay with just a flat electricity_duty
- * and none of these three bypasses this function entirely, preserving
- * today's pre-existing behavior for that value (see sanitize_extraction()).
+ * LEGACY/fallback duty derivation — superseded by
+ * resolve_electricity_duty_workbook() below for any fresh extraction that
+ * has the full input set that formula needs (Rite Water's official Solar
+ * Working Sheet, which recomputes duty from a rate% and never uses the
+ * bill's charged duty amount at all). Kept for exactly the case
+ * resolve_electricity_duty_workbook() can't handle: the workbook inputs
+ * are incomplete (e.g. tod_ec_total wasn't extracted) but SOME duty signal
+ * is still available, or a genuinely old-shaped row/replay has only a flat
+ * electricity_duty and none of the raw signals either function wants (see
+ * sanitize_extraction() for the exact fallback order across all three
+ * tiers). Originally written to fix a different, now-superseded bug: on a
+ * real bill (Shriram Stone Crusher), one vision run divided the bill's
+ * printed "E.D. on (Rs.) / Rate %" figure (7.50) by 100 -> 0.075, landing
+ * INSIDE the 0-3 plausible band with no flag raised, instead of the
+ * correct duty_total_amount / total_units = 4178.77 / 4510 = 0.9266.
  *
  *   (a) duty_per_unit, if the bill literally prints one AND it's plausible.
- *   (b) duty_total_amount / total_units — the deterministic fix for the
- *       bug above.
+ *   (b) duty_total_amount / total_units.
  *   (c) deliberately SKIPPED: duty_rate_pct% needs the bill's assessable
  *       base amount, which varies bill to bill — too fragile to guess.
  *       Falls through to null (flagged for manual entry by
@@ -343,6 +352,30 @@ function resolve_electricity_duty($dutyPerUnit, $dutyTotalAmount, $dutyRatePct, 
         return 0.0;
     }
     return null;
+}
+
+/**
+ * Workbook-EXACT duty derivation — Rite Water's official Solar Working
+ * Sheet, cell D33's duty term. The workbook does NOT use the bill's
+ * charged duty amount at all (unlike resolve_electricity_duty() above,
+ * which does); it recomputes duty from the rate% applied to the SUM of
+ * the other three charge totals plus the TOD Tariff EC line (which can be
+ * negative):
+ *   duty_per_unit = ROUND(duty_rate_pct/100 *
+ *     (energy_total + wheeling_total + fac_total + tod_ec_total) / total_units, 4)
+ * Reference bill (Shriram): 7.5% * (34546.6 + 6855.2 + 1353 - 57.83) /
+ * 4510 = 0.7100.
+ * Returns null if ANY required input is missing — this is the PRIMARY
+ * path for a fresh extraction; sanitize_extraction() falls back to
+ * resolve_electricity_duty() above only when this returns null.
+ */
+function resolve_electricity_duty_workbook($dutyRatePct, $energyTotal, $wheelingTotal, $facTotal, $todEcTotal, $totalUnits) {
+    if ($dutyRatePct === null || $energyTotal === null || $wheelingTotal === null ||
+        $facTotal === null || $todEcTotal === null || $totalUnits === null || $totalUnits <= 0) {
+        return null;
+    }
+    $sum = $energyTotal + $wheelingTotal + $facTotal + $todEcTotal;
+    return round(($dutyRatePct / 100) * ($sum / $totalUnits), 4);
 }
 
 /**
@@ -648,30 +681,52 @@ function parse_bill_text($text) {
 
     $cm = &$data['current_month'];
     $cm['total_units'] = find_number($text, 'Total\s*(?:Units|Consumption)\s*[:\-]?\s*');
-    $cm['energy_rate'] = find_number($text, 'Energy\s*Charg(?:es|e)\s*(?:@|Rate)?\s*[:\-]?\s*');
+
+    // Prefer the Solar Working Sheet's total-based per-unit derivation (see
+    // resolve_electricity_duty_workbook()'s doc comment) — try each
+    // charge's TOTAL-amount label first, dividing by total_units; fall back
+    // to the older direct-rate label if no total-labeled line is found.
+    // Best-effort/unverified against a real bill's text layer, like the
+    // rest of this fast path.
+    $energyTotal = find_number($text, 'Energy\s*Charg(?:es|e)\s*(?:Amount)?\s*[:\-]?\s*(?:Rs\.?|₹)?\s*');
+    if ($energyTotal !== null && $cm['total_units']) {
+        $cm['energy_rate'] = round($energyTotal / $cm['total_units'], 4);
+    } else {
+        $cm['energy_rate'] = find_number($text, 'Energy\s*Charg(?:es|e)\s*(?:@|Rate)?\s*[:\-]?\s*');
+    }
 
     // "Wheeling Charges" — NOT "Demand Charges" (a separate, fixed monthly
     // charge based on billed kVA that we deliberately never read; solar
     // doesn't avoid it, and mixing it in here was the original bug this
     // field's demand_charge_per_unit -> wheeling_per_unit rename fixed).
-    $cm['wheeling_per_unit'] = find_number($text, 'Wheeling\s*Charg(?:es|e)\s*(?:@|Rate|per\s*unit)\s*[:\-]?\s*');
-    if ($cm['wheeling_per_unit'] === null) {
-        $wheelingTotal = find_number($text, 'Wheeling\s*Charg(?:es|e)\s*(?:Amount)?\s*[:\-]?\s*(?:Rs\.?|₹)?\s*');
-        if ($wheelingTotal !== null && $cm['total_units']) {
-            $cm['wheeling_per_unit'] = round($wheelingTotal / $cm['total_units'], 4);
-        }
+    $wheelingTotal = find_number($text, 'Wheeling\s*Charg(?:es|e)\s*(?:Amount)?\s*[:\-]?\s*(?:Rs\.?|₹)?\s*');
+    if ($wheelingTotal !== null && $cm['total_units']) {
+        $cm['wheeling_per_unit'] = round($wheelingTotal / $cm['total_units'], 4);
+    } else {
+        $cm['wheeling_per_unit'] = find_number($text, 'Wheeling\s*Charg(?:es|e)\s*(?:@|Rate|per\s*unit)\s*[:\-]?\s*');
     }
 
-    $cm['fac'] = find_number($text, 'FAC\s*(?:@|Rate)?\s*[:\-]?\s*');
+    $facTotal = find_number($text, 'FAC\s*(?:Amount)?\s*[:\-]?\s*(?:Rs\.?|₹)?\s*');
+    if ($facTotal !== null && $cm['total_units']) {
+        $cm['fac'] = round($facTotal / $cm['total_units'], 4);
+    } else {
+        $cm['fac'] = find_number($text, 'FAC\s*(?:@|Rate)?\s*[:\-]?\s*');
+    }
 
-    // Same three-signal, no-arithmetic approach as the vision path (see
-    // resolve_electricity_duty()) — best-effort/unverified against a real
-    // bill's text layer, like the rest of this fast path. No distinct
-    // "per-unit duty" label pattern exists here (rare on real bills), so
-    // only the total amount and the rate-table percentage are attempted.
+    // Electricity duty: try the Solar Working Sheet's exact rate%-based
+    // formula first (needs the three totals above PLUS the "TOD Tariff EC"
+    // line's total, which can be negative) — fall back to the older
+    // amount/rate priority-chain if any of those aren't found. No distinct
+    // "per-unit duty" label pattern exists in free text (rare on real
+    // bills), so that tier of the older fallback is never populated here.
     $dutyTotalAmount = find_number($text, 'Electricity\s*Duty\s*(?:Amount)?\s*[:\-]?\s*(?:Rs\.?|₹)?\s*');
     $dutyRatePct = find_number($text, 'E\.?D\.?\s*(?:on\s*\(?Rs\.?\)?\s*)?\/?\s*Rate\s*%?\s*[:\-]?\s*');
-    $cm['electricity_duty'] = resolve_electricity_duty(null, $dutyTotalAmount, $dutyRatePct, $cm['total_units']);
+    $todEcTotal = find_number($text, 'TOD\s*Tariff\s*EC\s*[:\-]?\s*(?:Rs\.?|₹)?\s*');
+    $cm['duty_total_amount'] = $dutyTotalAmount;
+    $workbookDuty = resolve_electricity_duty_workbook($dutyRatePct, $energyTotal, $wheelingTotal, $facTotal, $todEcTotal, $cm['total_units']);
+    $cm['electricity_duty'] = ($workbookDuty !== null)
+        ? $workbookDuty
+        : resolve_electricity_duty(null, $dutyTotalAmount, $dutyRatePct, $cm['total_units']);
 
     $cm['tax_on_sale'] = find_number($text, 'Tax\s*on\s*Sale\s*[:\-]?\s*');
 
@@ -1118,9 +1173,10 @@ function vision_output_schema() {
                 'type' => 'object',
                 'properties' => array(
                     'total_units' => array('type' => array('number', 'null')),
-                    'energy_rate' => array('type' => array('number', 'null')),
-                    'wheeling_per_unit' => array('type' => array('number', 'null')),
-                    'fac' => array('type' => array('number', 'null')),
+                    'energy_total_amount' => array('type' => array('number', 'null')),
+                    'wheeling_total_amount' => array('type' => array('number', 'null')),
+                    'fac_total_amount' => array('type' => array('number', 'null')),
+                    'tod_ec_total' => array('type' => array('number', 'null')),
                     'duty_total_amount' => array('type' => array('number', 'null')),
                     'duty_rate_pct' => array('type' => array('number', 'null')),
                     'duty_per_unit' => array('type' => array('number', 'null')),
@@ -1138,7 +1194,7 @@ function vision_output_schema() {
                     ),
                 ),
                 'required' => array(
-                    'total_units', 'energy_rate', 'wheeling_per_unit', 'fac',
+                    'total_units', 'energy_total_amount', 'wheeling_total_amount', 'fac_total_amount', 'tod_ec_total',
                     'duty_total_amount', 'duty_rate_pct', 'duty_per_unit', 'tax_on_sale', 'tod',
                 ),
                 'additionalProperties' => false,
@@ -1176,9 +1232,10 @@ Return ONLY a single JSON object, no prose, no markdown fences, exactly this sha
   "sanctioned_load_unit": "kW"|"HP"|"kVA"|null,
   "current_month": {
     "total_units": number|null,
-    "energy_rate": number|null,
-    "wheeling_per_unit": number|null,
-    "fac": number|null,
+    "energy_total_amount": number|null,
+    "wheeling_total_amount": number|null,
+    "fac_total_amount": number|null,
+    "tod_ec_total": number|null,
     "duty_total_amount": number|null,
     "duty_rate_pct": number|null,
     "duty_per_unit": number|null,
@@ -1195,22 +1252,31 @@ Return ONLY a single JSON object, no prose, no markdown fences, exactly this sha
 }
 
 Rules:
-- All rate fields (energy_rate, wheeling_per_unit, fac, duty_per_unit,
-  tax_on_sale, and every tod rate) MUST be in RUPEES PER UNIT. MSEDCL prints some
-  of these in "Ps/U" (paise per unit). If a value is labelled Ps/U or paise,
-  DIVIDE BY 100. Example: "Tax on Sale @ 28.94 Ps/U" -> 0.2894. "FAC @ 20 Ps/U"
-  -> 0.20. Sanity: energy_rate is normally 5–10; fac/tax/wheeling-per-unit/
-  duty_per_unit are normally well below 1.
-- energy_rate is the base energy charge rate for the current month's units (the
-  "Energy Charges" rate, or the industrial/commercial consumption rate).
-- wheeling_per_unit: read the RATE from the bill's "Wheeling Charges" line —
-  that line prints TWO numbers, a small per-unit rate (e.g. 1.52) and a total
-  monthly amount (e.g. 2915.36). Use the RATE, not the amount. If only the
-  total amount is printed (no rate), divide it by total_units yourself. Do
-  NOT read the bill's separate "Demand Charges" line for this field — Demand
-  Charges is a different, fixed monthly charge (based on billed kVA, not
-  units) and must be ignored entirely; it is never used anywhere in this
-  extraction.
+- energy_total_amount / wheeling_total_amount / fac_total_amount / tod_ec_total:
+  copy each of these TOTAL RUPEE AMOUNTS for the current month EXACTLY as
+  printed in the bill's billing-details section — do NOT divide by units,
+  do NOT convert, just copy the number:
+    - energy_total_amount: the "Energy Charges" line's TOTAL amount for the
+      month (e.g. 34546.60), NOT a per-unit rate.
+    - wheeling_total_amount: the "Wheeling Charges" line's TOTAL amount
+      (e.g. 6855.20). That line usually also prints a small per-unit rate
+      nearby — ignore the rate, copy only the total. Do NOT read the bill's
+      separate "Demand Charges" line for this — Demand Charges is a
+      different, fixed monthly charge (based on billed kVA, not units) and
+      must be ignored entirely; it is never used anywhere in this extraction.
+    - fac_total_amount: the "FAC" (Fuel Adjustment Charge) line's TOTAL
+      amount (e.g. 1353.00), NOT a per-unit rate.
+    - tod_ec_total: the "TOD Tariff EC" (or similarly labelled Time-of-Day
+      tariff/energy-charge adjustment) line's TOTAL amount — CAN BE
+      NEGATIVE (e.g. -57.83). Preserve the sign exactly.
+  All server-side math (dividing each total by units, etc.) happens after
+  extraction — your job is to copy the printed totals, not compute per-unit
+  rates yourself.
+- tax_on_sale MUST be in RUPEES PER UNIT (read directly, not a total — this
+  one field on the bill is already printed per-unit). MSEDCL prints some
+  rate fields in "Ps/U" (paise per unit) — if labelled Ps/U or paise, DIVIDE
+  BY 100. Example: "Tax on Sale @ 28.94 Ps/U" -> 0.2894. Sanity: normally
+  well below 1.
 - duty_total_amount / duty_rate_pct / duty_per_unit: MSEDCL industrial bills
   typically show duty in TWO places — a rate table with a line like "E.D. on
   (Rs.) / Rate %" (e.g. 7.50), and a billing-details line labelled
@@ -1244,7 +1310,7 @@ Rules:
   and their units. Return the UNITS values, MOST RECENT FIRST, up to 12 numbers.
   Strip commas.
 - If any value is unclear, illegible, or you are guessing, put null for that field
-  and add its dotted path (e.g. "current_month.fac" or "tod.t09_17.rate") to
+  and add its dotted path (e.g. "current_month.fac_total_amount" or "tod.t09_17.rate") to
   low_confidence_fields. DO NOT invent numbers — a null the user can fill in is
   far better than a wrong value.
 - Strip thousands separators from all numbers. Return numbers as numbers, not
@@ -1286,20 +1352,59 @@ function sanitize_extraction($data) {
 
     $cmIn = isset($data['current_month']) && is_array($data['current_month']) ? $data['current_month'] : array();
     $cm = &$out['current_month'];
-    foreach (array('total_units', 'energy_rate', 'wheeling_per_unit', 'fac', 'tax_on_sale') as $k) {
-        if (isset($cmIn[$k]) && is_numeric($cmIn[$k])) $cm[$k] = (float) $cmIn[$k];
+    if (isset($cmIn['total_units']) && is_numeric($cmIn['total_units'])) {
+        $cm['total_units'] = (float) $cmIn['total_units'];
+    }
+    if (isset($cmIn['tax_on_sale']) && is_numeric($cmIn['tax_on_sale'])) {
+        $cm['tax_on_sale'] = (float) $cmIn['tax_on_sale'];
     }
 
-    // Electricity duty: resolve the three raw signals deterministically
-    // (see resolve_electricity_duty()). A legacy-shaped row/replay with
-    // just a flat electricity_duty and none of the three new raw fields
-    // bypasses resolution entirely, preserving pre-existing behavior
-    // (including validate_extraction()'s existing out-of-range/paise-fix
-    // handling) for that value.
+    /** Resolves ONE per-unit field from its raw monthly TOTAL (Rite Water's
+     *  Solar Working Sheet divides every charge total by total_units — see
+     *  SPEC.md's "Industrial per-unit charges" formula notes). A
+     *  legacy-shaped row/replay with just the OLD flat per-unit field and
+     *  no total bypasses this, preserving pre-existing behavior for that
+     *  value untouched. */
+    $resolvePerUnitFromTotal = function ($totalKey, $legacyKey) use ($cmIn, $cm) {
+        $total = isset($cmIn[$totalKey]) && is_numeric($cmIn[$totalKey]) ? (float) $cmIn[$totalKey] : null;
+        if ($total !== null && $cm['total_units'] !== null && $cm['total_units'] > 0) {
+            return round($total / $cm['total_units'], 4);
+        }
+        if (isset($cmIn[$legacyKey]) && is_numeric($cmIn[$legacyKey])) {
+            return (float) $cmIn[$legacyKey];
+        }
+        return null;
+    };
+    $cm['energy_rate'] = $resolvePerUnitFromTotal('energy_total_amount', 'energy_rate');
+    $cm['wheeling_per_unit'] = $resolvePerUnitFromTotal('wheeling_total_amount', 'wheeling_per_unit');
+    $cm['fac'] = $resolvePerUnitFromTotal('fac_total_amount', 'fac');
+
+    // Electricity duty — THREE-tier fallback, most-capable first:
+    //   1. resolve_electricity_duty_workbook(): the Solar Working Sheet's
+    //      exact rate%-based formula, needs ALL of duty_rate_pct + the
+    //      three charge totals above + tod_ec_total.
+    //   2. resolve_electricity_duty(): the older amount/rate priority-chain,
+    //      for when the workbook inputs are incomplete but some duty
+    //      signal is still present.
+    //   3. A genuinely old-shaped row/replay's flat electricity_duty,
+    //      passed through unchanged — preserving pre-existing behavior for
+    //      that value (including validate_extraction()'s existing
+    //      out-of-range/paise-fix handling).
+    $rawEnergyTotal = isset($cmIn['energy_total_amount']) && is_numeric($cmIn['energy_total_amount']) ? (float) $cmIn['energy_total_amount'] : null;
+    $rawWheelingTotal = isset($cmIn['wheeling_total_amount']) && is_numeric($cmIn['wheeling_total_amount']) ? (float) $cmIn['wheeling_total_amount'] : null;
+    $rawFacTotal = isset($cmIn['fac_total_amount']) && is_numeric($cmIn['fac_total_amount']) ? (float) $cmIn['fac_total_amount'] : null;
+    $rawTodEcTotal = isset($cmIn['tod_ec_total']) && is_numeric($cmIn['tod_ec_total']) ? (float) $cmIn['tod_ec_total'] : null;
     $rawDutyPerUnit = isset($cmIn['duty_per_unit']) && is_numeric($cmIn['duty_per_unit']) ? (float) $cmIn['duty_per_unit'] : null;
     $rawDutyTotal = isset($cmIn['duty_total_amount']) && is_numeric($cmIn['duty_total_amount']) ? (float) $cmIn['duty_total_amount'] : null;
     $rawDutyRatePct = isset($cmIn['duty_rate_pct']) && is_numeric($cmIn['duty_rate_pct']) ? (float) $cmIn['duty_rate_pct'] : null;
-    if ($rawDutyPerUnit !== null || $rawDutyTotal !== null || $rawDutyRatePct !== null) {
+    // Kept for display/logging only — the tariff calc no longer uses this
+    // (see resolve_electricity_duty_workbook()).
+    $cm['duty_total_amount'] = $rawDutyTotal;
+
+    $workbookDuty = resolve_electricity_duty_workbook($rawDutyRatePct, $rawEnergyTotal, $rawWheelingTotal, $rawFacTotal, $rawTodEcTotal, $cm['total_units']);
+    if ($workbookDuty !== null) {
+        $cm['electricity_duty'] = $workbookDuty;
+    } elseif ($rawDutyPerUnit !== null || $rawDutyTotal !== null || $rawDutyRatePct !== null) {
         $cm['electricity_duty'] = resolve_electricity_duty($rawDutyPerUnit, $rawDutyTotal, $rawDutyRatePct, $cm['total_units']);
     } elseif (isset($cmIn['electricity_duty']) && is_numeric($cmIn['electricity_duty'])) {
         $cm['electricity_duty'] = (float) $cmIn['electricity_duty'];

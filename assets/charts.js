@@ -117,11 +117,11 @@
   function drawTable(tableEl, rows, inr) {
     var z = function (x) { return x ? inr(x) : "—"; };
     var h = "<thead><tr><th>Year</th><th>Per-unit Rate</th><th>Generation (units)</th><th>Gross Savings</th>" +
-      "<th>AMC</th><th>Depreciation Tax Benefit</th><th>Short-Term Finance Cost</th><th>Spares &amp; Replacements</th>" +
+      "<th>AMC</th><th>Insurance</th><th>Depreciation Tax Benefit</th><th>Short-Term Finance Cost</th><th>Spares &amp; Replacements</th>" +
       "<th>Interest Earned</th><th>Yearly Cash Flow</th><th>Cumulative Cash Flow</th></tr></thead><tbody>";
     rows.forEach(function (r) {
       h += "<tr><td>" + r.y + "</td><td>₹" + r.rate.toFixed(2) + "</td><td>" + Math.round(r.gen).toLocaleString("en-IN") +
-        "</td><td>" + inr(r.gross) + "</td><td>" + inr(r.amc) + "</td><td>" + inr(r.depBen) + "</td><td>" + z(r.fin) +
+        "</td><td>" + inr(r.gross) + "</td><td>" + inr(r.amc) + "</td><td>" + inr(r.insurance) + "</td><td>" + inr(r.depBen) + "</td><td>" + z(r.fin) +
         "</td><td>" + z(r.spares) + "</td><td>" + z(r.interest) + "</td><td>" + inr(r.net) + "</td><td>" + inr(r.cum) + "</td></tr>";
     });
     tableEl.innerHTML = h + "</tbody>";

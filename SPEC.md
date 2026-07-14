@@ -51,6 +51,7 @@ wiring" and "Admin page" below.
     "wheeling_per_unit": 0,
     "fac": 0,
     "electricity_duty": 0,
+    "duty_total_amount": 0,
     "tax_on_sale": 0,
     "tod": {
       "t00_06": { "units": 0, "rate": 0 },
@@ -82,28 +83,47 @@ Notes:
   missing key, only null values within whichever one is live.
 - `tariff_code`: e.g. `"LT-V B II"`.
 - `current_month.total_units`: e.g. `5703`.
-- `current_month.energy_rate`: base energy Rs/unit, e.g. `7.66`.
-- `current_month.wheeling_per_unit`: Rs/unit, e.g. `1.52` — read from the
-  bill's "Wheeling Charges" line's RATE (that line also prints a total
-  monthly amount, e.g. `2915.36`; not used). Do NOT confuse with the bill's
-  separate "Demand Charges" line (a different, fixed monthly charge based on
-  billed kVA) — that is never read, on purpose (solar doesn't avoid it).
-  (This field was named `demand_charge_per_unit` until real-bill testing
-  found that was the wrong label for the same already-correctly-captured
-  value — see "Extraction implementation notes" and Owner notes below.)
-- `current_month.fac`: Rs/unit, e.g. `0.20`.
-- `current_month.electricity_duty`: Rs/unit, e.g. `0` — a RESOLVED value,
-  computed deterministically in PHP (`resolve_electricity_duty()`) from
-  three raw signals the vision model copies verbatim off the bill
-  (`duty_total_amount`, `duty_rate_pct`, `duty_per_unit` — extraction-input
-  fields, not part of this canonical shape; see "Extraction implementation
-  notes"). Model-side arithmetic for this field was found to be
-  nondeterministic and is no longer trusted at all — on a real bill, one
-  vision run divided the printed 7.50% rate by 100 (0.075, landing INSIDE
-  the plausible band with no flag raised) instead of the correct
-  `duty_total_amount / total_units` (4178.77 / 4510 = 0.9266). Duty-exempt
-  bills correctly resolve to `0` (a confirmed value, never flagged for
-  review), not `null`. Only a genuinely unreadable duty resolves to `null`.
+- `current_month.energy_rate`/`wheeling_per_unit`/`fac`: all Rs/unit (e.g.
+  `7.66`/`1.52`/`0.30`), and all THREE are now RESOLVED values, computed
+  deterministically in PHP (`sanitize_extraction()`'s
+  `$resolvePerUnitFromTotal` closure) by dividing the bill's monthly TOTAL
+  for that charge by `total_units` — matching Rite Water's official Solar
+  Working Sheet, which does the same division rather than trusting a
+  printed rate. The vision model is asked for `energy_total_amount`/
+  `wheeling_total_amount`/`fac_total_amount` (extraction-input fields, not
+  part of this canonical shape — see "Extraction implementation notes"),
+  never a rate directly, for exactly the reason `electricity_duty` below
+  moved off model-side arithmetic: it's deterministic and can't drift
+  between runs. `wheeling_total_amount` — do NOT confuse with the bill's
+  separate "Demand Charges" line (a different, fixed monthly charge based
+  on billed kVA) — that is never read, on purpose (solar doesn't avoid
+  it). (`wheeling_per_unit` was named `demand_charge_per_unit` until
+  real-bill testing found that was the wrong label for the same
+  already-correctly-captured value, and was itself a directly-read rate
+  until the Solar Working Sheet alignment task moved it to this
+  total-based derivation — see "Extraction implementation notes" and
+  Owner notes below.)
+- `current_month.electricity_duty`: Rs/unit, e.g. `0.71` — a RESOLVED
+  value. PRIMARY path (`resolve_electricity_duty_workbook()`): Rite
+  Water's official Solar Working Sheet's exact formula, `duty_rate_pct/100
+  × (energy_total + wheeling_total + fac_total + tod_ec_total) /
+  total_units` — the workbook does NOT use the bill's charged duty amount
+  at all. FALLBACK path (`resolve_electricity_duty()`, used only when the
+  workbook formula's inputs are incomplete): the older
+  amount-total/total_units approach. Model-side arithmetic for this field
+  was found to be nondeterministic TWICE — first a real bill's total
+  amount was mistaken for the per-unit value outright, then (after asking
+  the model to divide the total by units itself) a LATER run of the SAME
+  bill instead divided the printed rate% by 100, landing inside the
+  plausible band with no flag raised. Neither mistake is possible now — the
+  model only ever copies raw totals/percentages verbatim; ALL arithmetic
+  is deterministic PHP. Duty-exempt bills correctly resolve to `0` (a
+  confirmed value, never flagged for review), not `null`. Only a genuinely
+  unreadable duty resolves to `null`.
+- `current_month.duty_total_amount`: the bill's actual charged duty amount
+  for the month (e.g. `4178.77`) — kept for display/logging even though
+  the tariff calculation no longer uses it (see above). Not itself
+  validated/collected back from the confirm screen.
 - `current_month.tax_on_sale`: Rs/unit, e.g. `0.2894`.
 - `tod.t09_17.rate` can be negative — a daytime rebate, e.g. `-1.149`.
 - `tod.t17_24.rate` e.g. `1.915`.
@@ -159,32 +179,41 @@ Notes:
   four small-rate fields comes out > 5, it was almost certainly left in
   paise — divide by 100. The confirm screen is the backstop for anything this
   heuristic gets wrong.
-- **`wheeling_per_unit`.** Read from the bill's "Wheeling Charges" line,
-  which prints BOTH a per-unit rate and a total monthly amount — use the
-  rate; only derive `wheeling_total / total_units` if no rate is printed.
-  Do NOT read the bill's separate "Demand Charges" line for this (a
+- **`energy_total_amount`/`wheeling_total_amount`/`fac_total_amount` — copy
+  the TOTAL, never a rate.** Rite Water's official Solar Working Sheet
+  computes every one of these per-unit charges as `charge_total /
+  total_units` — it never trusts a bill's printed per-unit rate for any of
+  the three. The vision schema asks for each charge's monthly TOTAL amount
+  only (e.g. energy `34546.60`, wheeling `6855.20`, FAC `1353.00`); PHP
+  (`sanitize_extraction()`) always does the division. `wheeling_total_amount`
+  — do NOT read the bill's separate "Demand Charges" line for this (a
   different, fixed monthly charge based on billed kVA — always ignored,
   deliberately, since solar doesn't avoid it).
 - **`electricity_duty` — copy verbatim, compute nothing.** MSEDCL industrial
   bills print duty in TWO places: a rate table (e.g. "E.D. on (Rs.) /
   Rate % 7.50") and a billing-details line with the monthly TOTAL amount
   (e.g. `4178.77`). Model-side conversion between these was found to be
-  NONDETERMINISTIC and is no longer trusted at all — first a real bill's
-  total amount (`4178.77`) was mistaken for the per-unit value outright
-  (producing a ~₹4185/unit effective tariff and a garbage dashboard: ₹697 Cr
-  earnings, 5946x multiple, blank IRR); after that was fixed by asking the
-  model to divide the total by units itself, a LATER run on the SAME bill
-  instead divided the printed 7.50% rate by 100 (`0.075`) — a value that
-  happened to land inside the plausible 0-3 band, so no flag caught it
-  either. The vision schema now asks for three RAW fields instead —
-  `duty_total_amount`, `duty_rate_pct`, `duty_per_unit` — copied exactly as
-  printed, with an explicit "do NOT convert or divide" instruction for all
-  three. All arithmetic moved to deterministic PHP
-  (`resolve_electricity_duty()` in `api/extract.php`): try a printed
-  per-unit rate first, then `duty_total_amount / total_units`; a rate
-  percentage alone is deliberately NOT converted (it needs the bill's
-  assessable base amount, which varies bill to bill — too fragile to guess)
-  — flagged for manual entry instead.
+  NONDETERMINISTIC TWICE — first a real bill's total amount (`4178.77`)
+  was mistaken for the per-unit value outright (producing a ~₹4185/unit
+  effective tariff and a garbage dashboard: ₹697 Cr earnings, 5946x
+  multiple, blank IRR); after that was fixed by asking the model to divide
+  the total by units itself, a LATER run on the SAME bill instead divided
+  the printed 7.50% rate by 100 (`0.075`) — a value that happened to land
+  inside the plausible 0-3 band, so no flag caught it either. The vision
+  schema asks for three RAW fields — `duty_total_amount`, `duty_rate_pct`,
+  `duty_per_unit` — copied exactly as printed, with an explicit "do NOT
+  convert or divide" instruction for all three. ALL arithmetic is
+  deterministic PHP, and — after this task — the bill's charged duty
+  amount isn't even part of the primary formula anymore:
+  `resolve_electricity_duty_workbook()` in `api/extract.php` recomputes
+  duty from `duty_rate_pct% × (energy_total + wheeling_total + fac_total +
+  tod_ec_total) / total_units` (the Solar Working Sheet's exact cell
+  formula — `tod_ec_total` is a fourth new raw field, the bill's "TOD
+  Tariff EC" line total, which CAN BE NEGATIVE). `resolve_electricity_duty()`
+  (the older amount/rate priority-chain from the previous fix) is now only
+  a FALLBACK, used when the workbook formula's inputs are incomplete —
+  never the primary path for a fresh extraction with everything the
+  workbook formula needs.
 - **`electricity_duty` exemption.** Some industrial bills ARE duty-exempt
   and print the duty line as `0.00` or "Exempt" — the resolved value is `0`
   (a confirmed value) in that case, never `null`, and never flagged for
@@ -378,11 +407,11 @@ in `backend_and_admin.md`.)
 **Seed values:**
 
 ```
-rate_per_kwp=51000, gst_rate=0.089, gen_per_kwp_day=4, amc_rate_per_kwp=1200,
+rate_per_kwp=52000, gst_rate=0.089, gen_per_kwp_day=4, amc_rate_per_kwp=1200,
 amc_esc=0.01, deg_y1=0.03, deg_yr=0.0071, spares_on=true,
-spares_rate_per_kwp=2800, spares_base_rate=2000, discount=0.12,
-int_surplus=0.045, days=365, dep_rate=0.40, dep_years=9, proc_fee_pct=0.01,
-tariff_esc=0.03, gsc=1.96, daytime_window="06-17", years=25,
+spares_rate_per_kwp=2800, spares_base_rate=2000, insurance_rate_pct=0.33,
+discount=0.12, int_surplus=0.045, days=365, dep_rate=0.40, dep_years=9,
+proc_fee_pct=0.01, tariff_esc=0.03, gsc=1.96, daytime_window="06-17", years=25,
 // scenario defaults (starting slider positions on the dashboard):
 dep_default=true, tax_default=25.18, loan_default=false, dp_default=20,
 loan_rate_default=9, tenure_months_default=60, fd_rate_default=7,
@@ -429,6 +458,42 @@ EFFECTIVE_TARIFF (Rs/unit) =
   // testing found that was the wrong label for this same, already-correctly-
   // captured value — pure rename, this formula and its result are unchanged)
 
+  // WORKBOOK ALIGNMENT (industrial only, commercial untouched): this exact
+  // summation already matched Rite Water's official Solar Working Sheet
+  // cell D33 — energy_rate + wheeling_per_unit + fac + electricity_duty +
+  // tax_on_sale - GSC + tod.t09_17.rate, term for term — so this formula
+  // itself needed NO code change. What changed is HOW energy_rate/
+  // wheeling_per_unit/fac/electricity_duty are resolved upstream, in
+  // api/extract.php's sanitize_extraction(), before they ever reach this
+  // file:
+  //   - energy_rate/wheeling_per_unit/fac are now each (that charge's
+  //     extracted TOTAL Rs for the month) / total_units, computed in PHP
+  //     from model-extracted totals (energy_total_amount/
+  //     wheeling_total_amount/fac_total_amount) rather than a model-
+  //     extracted per-unit rate — same deterministic-PHP-arithmetic
+  //     rationale as electricity_duty below.
+  //   - electricity_duty is now, by default, resolve_electricity_duty_
+  //     workbook(): ROUND(duty_rate_pct/100 * (energy_total + wheeling_total
+  //     + fac_total + tod_ec_total) / total_units, 4) — the workbook's rate-
+  //     based recomputation, which does NOT use the bill's own charged duty
+  //     amount. The prior resolve_electricity_duty() (bill-amount-based) is
+  //     kept as a fallback when the new formula's inputs (duty_rate_pct,
+  //     the four totals, total_units) aren't all present, and a flat legacy
+  //     value is the final fallback. duty_total_amount is still extracted/
+  //     logged for display but is NOT used in the tariff calculation.
+  //   - tod.t09_17.rate is unchanged here (it was already added raw/
+  //     unweighted, never daytime-weighted, in this formula) — the "remove
+  //     daytime-weighting for industrial" instruction that motivated this
+  //     alignment task turned out to already be true of this term; daytime
+  //     weighting only ever applied to DAYTIME_FRACTION below, which is a
+  //     sizing input, not a tariff input, and is intentionally untouched.
+  // Reference bill (Shriram Stone Crusher) after alignment: energy_rate
+  // 7.66 + wheeling_per_unit 1.52 + fac 0.30 + electricity_duty 0.71 +
+  // tax_on_sale 0.279 - GSC 1.96 + tod.t09_17.rate (-1.149) = 7.36 exactly.
+  // See the Extraction sections above for the new extracted-field shape and
+  // the Owner notes at the end of this file for what was reconstructed vs.
+  // given for this reference bill.
+
 DAYTIME_FRACTION = (tod.t06_09.units + tod.t09_17.units) / current_month.total_units
 
   // NOTE / OPEN CHOICE: the source Excel used the 06:00-17:00 window
@@ -447,10 +512,28 @@ OFFERED_KWP        = ceil(REQUIRED_KWP_EXACT)      // round UP to next whole kWp
 
 ANNUAL_GENERATION = OFFERED_KWP * GEN_PER_KWP_DAY * DAYS   // Year-1, before degradation
 GROSS_COST        = OFFERED_KWP * RATE_PER_KWP
+  // RATE_PER_KWP for industrial is a flat config constant, default 52000
+  // (Rite Water's real quoted flat rate — was a 51000 placeholder before
+  // this alignment task; admin-editable, see "Configuration" above).
+  // Commercial is untouched: still the floor-lookup `commercial_rate_table`.
 GST_AMOUNT        = GROSS_COST * GST_RATE
 NET_COST_INC_GST  = GROSS_COST + GST_AMOUNT
 EX_GST_CAPITAL    = GROSS_COST   // returns are computed on ex-GST (ITC
                                   // recoverable for C&I)
+
+INSURANCE (per year, every year of the 25-year horizon, both categories) =
+    NET_COST_INC_GST * (INSURANCE_RATE_PCT / 100)
+  // Computed ONCE from NET_COST_INC_GST and reused unchanged for all 25
+  // years — flat, unlike AMC which escalates yearly via AMC_ESC. Config
+  // constant INSURANCE_RATE_PCT defaults to 0.33 (i.e. 0.33% of net project
+  // cost incl. GST, per the Solar Working Sheet). Implemented in
+  // assets/engine.js; subtracted in every year's net cash flow alongside
+  // AMC, and included (summed across all 25 years, alongside AMC and
+  // spares) in the LCOE denominator-adjustment numerator:
+  //   LCOE = (NET_COST_INC_GST + sum(AMC) + sum(spares) + sum(insurance))
+  //          / sum(annual generation, all 25 years)
+  // See "Dashboard implementation" below for where the Insurance column
+  // appears in the 25-year schedule tables (on-screen and PDF).
 ```
 
 **Defensive guard** (`assets/formulation.js`): `derive()` throws rather than
@@ -657,7 +740,10 @@ separate by responsibility:
   same as the original's module-level `chCmp`/`chLump`/`chLev`). Includes
   the same Chart-undefined fallback the original had, so a blocked Chart.js
   CDN degrades to no-op stub charts instead of crashing the whole page —
-  every text metric and the table still render.
+  every text metric and the table still render. `drawTable()`'s "View full
+  25-year schedule" table has an **Insurance** column immediately after
+  AMC (`r.insurance`, per row from `RiteEngine.compute()` — see "Formulas"
+  above), reflecting the flat per-year insurance cost.
 
 **Wiring** (`assets/js/app.js`): "Confirm & see my estimate" collects the
 confirmed JSON, loads config, runs `RiteFormulation.derive()`, and — on
@@ -1114,15 +1200,19 @@ left, "Investment Memorandum · {Company} · Page N" right):
   green-accented financed-option panel (6 mini-stats + a templated
   paragraph — see below).
 - **Page 3** — top band ("25-year cash-flow schedule"), a caption noting
-  this is the all-cash case, the 25-year table (8 columns — Yr/Rate/Units/
-  Gross Saving/AMC/Dep. Benefit/Net Cash Flow/Cumulative, dropping Finance
-  Cost/Spares/Interest to match the reference's simpler layout; the
-  underlying `r.net`/`r.cum` figures already fold spares in regardless of
-  whether that column is shown, so nothing is miscalculated by omitting
-  it), striped rows, Net Cash Flow bold green/red by sign, Cumulative red
-  when negative (`didParseCell` in the `jspdf-autotable` call), and the
-  existing short disclaimer sentence beneath it (kept verbatim, per the
-  brief — NOT the reference's own longer legal paragraph).
+  this is the all-cash case, the 25-year table (9 columns — Yr/Rate/Units/
+  Gross Saving/AMC/Insurance/Dep. Benefit/Net Cash Flow/Cumulative, dropping
+  Finance Cost/Spares/Interest to match the reference's simpler layout; the
+  underlying `r.net`/`r.cum` figures already fold spares (and now insurance)
+  in regardless of whether that column is shown, so nothing is
+  miscalculated by omitting it), striped rows, Net Cash Flow bold
+  green/red by sign, Cumulative red when negative (`didParseCell` in the
+  `jspdf-autotable` call — its column-index checks were bumped from 6/7 to
+  7/8 to account for the new Insurance column), and the existing short
+  disclaimer sentence beneath it (kept verbatim, per the brief — NOT the
+  reference's own longer legal paragraph). Insurance is 0.33% of net
+  project cost (incl. GST), flat every year — see "Formulas" above for the
+  exact computation.
 
 One deliberate deviation from the reference's literal numbers: the
 "work this hard"/"value back" panel uses `RiteEngine.inrShort()` (auto
@@ -1973,3 +2063,111 @@ success" report ever comes up for either of them.
     against the real file to catch drift, per this file's established
     pattern for this class of test. Not tested against a real Anthropic
     account actually out of credits, or clicked through in a browser.
+
+- **Industrial tariff/pricing/cost alignment to Rite Water's Solar Working
+  Sheet** (`api/extract.php`, `assets/config-defaults.js`, `assets/engine.js`,
+  `assets/charts.js`, `assets/report.js`, `admin/admin.js`). Commercial path
+  untouched throughout — every change below is industrial-only.
+  - **The tariff formula itself (`assets/formulation.js` `deriveIndustrial()`)
+    needed ZERO changes.** Its existing summation — `energy_rate +
+    wheeling_per_unit + fac + electricity_duty + tax_on_sale - GSC +
+    tod.t09_17.rate` — already matches the workbook's cell D33 term for
+    term, and `tod.t09_17.rate` was already added raw/unweighted (daytime
+    weighting only ever fed `daytime_fraction`, a sizing input, never the
+    tariff). Verified this by direct term-by-term comparison before
+    touching any code, to avoid an unnecessary or wrong edit.
+  - **What actually changed is upstream, in `api/extract.php`'s
+    `sanitize_extraction()`**: `energy_rate`/`wheeling_per_unit`/`fac` are
+    now each derived as (extracted TOTAL Rs for that charge) / total_units
+    in PHP, rather than asking the model to extract a per-unit rate
+    directly — same "model copies raw totals verbatim, PHP does the
+    division" rationale as every prior extraction-hardening task this
+    session. `electricity_duty` now resolves via a new
+    `resolve_electricity_duty_workbook()` (the rate-based recomputation:
+    `ROUND(duty_rate_pct/100 * (energy_total+wheeling_total+fac_total+
+    tod_ec_total)/total_units, 4)`) as the PRIMARY path, falling back to
+    the previous bill-amount-based `resolve_electricity_duty()` and then to
+    a flat legacy value if the new formula's inputs are incomplete — a
+    three-tier fallback, mirroring the two-tier one used for energy/
+    wheeling/fac. `duty_total_amount` is still extracted and stored for
+    display/logging but is never fed into the tariff calculation. The
+    confirm screen (`assets/js/app.js`) needed no changes at all: it only
+    ever sees the final resolved per-unit `electricity_duty` value (now on
+    the 0.71 basis for the reference bill), same field name/shape as
+    before.
+  - **Reconstructed, not given, reference-bill inputs — flagging explicitly.**
+    The task supplied the target `effective_tariff` (7.36) and the duty
+    intermediate (0.71) but not every input needed to reach them. `TOS`
+    (0.279) and the 09-17 slot rate (-1.149) were reused from earlier
+    reference bills already present in this session (TOS from the
+    commercial reference; the ToD rate from an earlier synthetic industrial
+    one) and solving backward against the other four already-verified
+    terms confirmed they reproduce 7.36 exactly — but they were not stated
+    as literal facts about the Shriram bill by the user. Similarly, this
+    task never specified the ToD units split or the 12-month billing
+    history, both of which only affect SIZING (not the tariff, per the
+    point above); `t09_17.units = 4510` (all of `total_units`, giving
+    `daytime_fraction = 1.0`) and a billing history summing to 32157 (reused
+    from an earlier commercial reference in this session) were chosen
+    because they land on the required 23 kWp under the existing,
+    unmodified sizing formula — an assumption, not given data. If the real
+    Shriram bill's actual ToD split or billing history differs, the sizing
+    inputs above should be replaced with the real values (the sizing
+    formula itself does not need to change).
+  - **`rate_per_kwp` → 52000** (`assets/config-defaults.js`, was
+    51000/placeholder), admin-editable via `admin/admin.js`. Since this is
+    an EXISTING config key, not a new one, changing the code default alone
+    does nothing for an already-deployed Supabase `app_config` row — the DB
+    value wins over the code default on load. `backend_and_admin.md` has an
+    explicit `UPDATE app_config SET config = config || '{...}'::jsonb ...`
+    statement for `rate_per_kwp`/`insurance_rate_pct` together; it must
+    actually be run against the live row for this to take effect in
+    production (a fresh/never-configured deployment would pick it up from
+    the code default alone).
+  - **Insurance — new recurring cost line** (`assets/engine.js`,
+    `assets/config-defaults.js` `insurance_rate_pct` default 0.33,
+    `admin/admin.js`, `assets/charts.js`, `assets/report.js`). Computed
+    ONCE as `netCost * (insurance_rate_pct/100)` and reused UNCHANGED for
+    all 25 years — deliberately flat, unlike AMC which escalates via
+    `amc_esc` — then subtracted from every year's net cash flow (`oper`/
+    `operCM`) alongside AMC, exposed per-row as `r.insurance`, and shown as
+    its own column next to AMC in both the on-screen "View full 25-year
+    schedule" table (`charts.js` `drawTable()`) and the PDF cash-flow table
+    (`report.js`, 8→9 columns, `didParseCell` column-index checks bumped
+    6/7→7/8 accordingly). **Judgment call, not explicitly requested:**
+    included `sumInsurance` in the LCOE numerator alongside AMC/spares
+    (`lcoe = (netCost + sumAMC + sumSp + sumInsurance) / energy`) — reasoned
+    that insurance is a real recurring cost like AMC/spares and should be
+    treated consistently for LCOE to stay meaningful; flag if LCOE should
+    exclude it. **Numeric discrepancy, reported not silently reconciled:**
+    the task's own worked example ("~14.16L net → ~4672/yr") doesn't match
+    this task's own Shriram reference bill under the new 52000 rate (net
+    cost computes to ≈13.02L → ≈4298/yr) — the 0.33% COEFFICIENT was
+    verified exactly against the task's own numbers (0.33% × 1,416,000 =
+    4672.8 exactly), so the formula is confirmed correct; the 14.16L figure
+    appears to be an independent illustrative example rather than this
+    specific reference bill's actual net cost, and both numbers were
+    reported transparently rather than forcing an artificial match.
+  - **Verified end to end** (Node + PHP harnesses in the scratchpad
+    directory, `RiteFormulation.derive()` and `RiteEngine.compute()` called
+    directly with the reconstructed Shriram inputs above): `effective_tariff
+    = 7.36` exactly, duty intermediate `= 0.71` exactly (hand-verified: 7.5%
+    × (34546.6+6855.2+1353-57.83)/4510 = 0.7100), `offered_kwp = 23`,
+    `grossCost = 23 * 52000 = 1,196,000`, `netCost ≈ 1,302,444` (incl. 8.9%
+    GST), Year-1 (and every year's) `insurance = netCost * 0.33% ≈ 4298`
+    flat across all 25 rows, `IRR ≈ 32.04%`, `payback ≈ 4.228 yrs`, `LCOE ≈
+    3.2424` Rs/unit. Commercial regression re-run in the same harness stayed
+    bit-identical: `effective_tariff = 10.0621`, `offered_kwp = 7.49`,
+    `rate_per_kwp = 58000` (untouched floor-lookup table). `php -l
+    api/extract.php` and `node --check` on every touched JS file
+    (`config-defaults.js`, `engine.js`, `charts.js`, `report.js`,
+    `admin/admin.js`) passed with no errors; all `?v=` query strings on
+    touched JS were bumped in `index.html`/`admin/index.html`. **Not
+    tested**: no real bill was uploaded through the actual extraction
+    pipeline/vision model in a browser — the new
+    `energy_total_amount`/`wheeling_total_amount`/`fac_total_amount`/
+    `tod_ec_total` extraction fields and the new `resolve_electricity_duty_
+    workbook()` path are verified by code inspection, `php -l`, and the
+    Node/PHP harnesses' direct calls into `sanitize_extraction()`'s
+    constituent functions only, not by an actual Claude vision call against
+    a real bill image.

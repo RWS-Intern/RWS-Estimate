@@ -24,7 +24,10 @@
 
   var DEFAULTS = {
     // engine / formulation constants
-    rate_per_kwp: 51000,
+    // rate_per_kwp: the real quoted flat industrial rate — Rs 52,000/kWp
+    // (was 51000/placeholder; updated to align with Rite Water's official
+    // Solar Working Sheet).
+    rate_per_kwp: 52000,
     gst_rate: 0.089,
     gen_per_kwp_day: 4,
     amc_rate_per_kwp: 1200,
@@ -34,6 +37,10 @@
     spares_on: true,
     spares_rate_per_kwp: 2800,
     spares_base_rate: 2000,
+    // insurance_rate_pct: % of net project cost (incl. GST) charged every
+    // year, flat (no escalation) — a recurring cost line like AMC, per the
+    // Solar Working Sheet. e.g. 0.33% of a ~14.16L net cost ≈ Rs 4,672/yr.
+    insurance_rate_pct: 0.33,
     discount: 0.12,
     int_surplus: 0.045,
     days: 365,

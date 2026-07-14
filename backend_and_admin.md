@@ -24,16 +24,38 @@ Run the SQL in the Supabase SQL editor first, then the two Claude Code prompts.
 
 Admin-editable constants (seed app_config with these):
 ```
-rate_per_kwp=51000, gst_rate=0.089, gen_per_kwp_day=4, amc_rate_per_kwp=1200,
+rate_per_kwp=52000, gst_rate=0.089, gen_per_kwp_day=4, amc_rate_per_kwp=1200,
 amc_esc=0.01, deg_y1=0.03, deg_yr=0.0071, spares_on=true,
-spares_rate_per_kwp=2800, spares_base_rate=2000, discount=0.12,
-int_surplus=0.045, days=365, dep_rate=0.40, dep_years=9, proc_fee_pct=0.01,
-tariff_esc=0.03, gsc=1.96, daytime_window="06-17",
+spares_rate_per_kwp=2800, spares_base_rate=2000, insurance_rate_pct=0.33,
+discount=0.12, int_surplus=0.045, days=365, dep_rate=0.40, dep_years=9,
+proc_fee_pct=0.01, tariff_esc=0.03, gsc=1.96, daytime_window="06-17",
 // scenario defaults (starting slider positions on the dashboard):
 dep_default=true, tax_default=25.18, loan_default=false, dp_default=20,
 loan_rate_default=9, tenure_months_default=60, fd_rate_default=7,
 // comparison rates on the "vs deposit/bond" chart:
 bond_rate=0.08, savings_rate=0.035, equity_rate=0.12
+```
+
+`rate_per_kwp` changed from `51000` (placeholder) to `52000` (the real
+quoted flat industrial rate, per Rite Water's official Solar Working
+Sheet), and `insurance_rate_pct` (new — 0.33% of net project cost incl.
+GST, charged flat every year like a permanent AMC-style line, no
+escalation) was added — see SPEC.md's "Industrial formulation: Solar
+Working Sheet alignment" section. **If `app_config` already has a row**
+(it almost certainly does — a fresh `insert ... on conflict do nothing`
+below is a no-op against an existing row, and `rate_per_kwp` being an
+EXISTING key means the code-default change alone does nothing for a live
+site either — `RiteConfig.load()` merges the DB's value ON TOP of the
+code default, so the DB's stale `51000` keeps winning until it's actually
+updated), run this once to bring an existing row up to date:
+```sql
+update app_config
+set config = config || '{
+  "rate_per_kwp": 52000,
+  "insurance_rate_pct": 0.33
+}'::jsonb,
+    updated_at = now()
+where id = 1;
 ```
 
 **Commercial formulation constants** (added alongside the commercial tariff
@@ -80,9 +102,10 @@ create table if not exists app_config (
 
 -- Seed the one row with the defaults above (fill in the full JSON):
 insert into app_config (id, config) values (1, '{
-  "rate_per_kwp":51000,"gst_rate":0.089,"gen_per_kwp_day":4,
+  "rate_per_kwp":52000,"gst_rate":0.089,"gen_per_kwp_day":4,
   "amc_rate_per_kwp":1200,"amc_esc":0.01,"deg_y1":0.03,"deg_yr":0.0071,
   "spares_on":true,"spares_rate_per_kwp":2800,"spares_base_rate":2000,
+  "insurance_rate_pct":0.33,
   "discount":0.12,"int_surplus":0.045,"days":365,"dep_rate":0.40,
   "dep_years":9,"proc_fee_pct":0.01,"tariff_esc":0.03,"gsc":1.96,
   "daytime_window":"06-17","dep_default":true,"tax_default":25.18,

@@ -583,7 +583,7 @@
     rows.forEach(function (r) {
       body.push([
         r.y, r.rate.toFixed(2), Math.round(r.gen).toLocaleString("en-US"),
-        fmt(r.gross), fmt(r.amc), fmt(r.depBen), fmt(r.net), fmt(r.cum)
+        fmt(r.gross), fmt(r.amc), fmt(r.insurance), fmt(r.depBen), fmt(r.net), fmt(r.cum)
       ]);
       raw.push({ net: r.net, cum: r.cum });
     });
@@ -597,7 +597,7 @@
       margin: { left: MARGIN, right: MARGIN },
       theme: "striped",
       alternateRowStyles: { fillColor: GRAY },
-      head: [["Yr", "Rate", "Units", "Gross Saving", "AMC", "Dep. Benefit", "Net Cash Flow", "Cumulative"]],
+      head: [["Yr", "Rate", "Units", "Gross Saving", "AMC", "Insurance", "Dep. Benefit", "Net Cash Flow", "Cumulative"]],
       body: schedule.body,
       styles: { font: FONT_FAMILY, fontSize: 9, cellPadding: 4, halign: "right" },
       headStyles: { font: FONT_FAMILY, fillColor: NAVY, textColor: WHITE, fontSize: 9.5, halign: "right" },
@@ -606,10 +606,10 @@
         if (data.section !== "body") return;
         var raw = schedule.raw[data.row.index];
         if (!raw) return;
-        if (data.column.index === 6) {
+        if (data.column.index === 7) {
           data.cell.styles.fontStyle = "bold";
           data.cell.styles.textColor = raw.net < 0 ? RED : GREEN;
-        } else if (data.column.index === 7 && raw.cum < 0) {
+        } else if (data.column.index === 8 && raw.cum < 0) {
           data.cell.styles.textColor = RED;
         }
       }
