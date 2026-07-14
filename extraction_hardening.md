@@ -62,13 +62,16 @@ Return ONLY a single JSON object, no prose, no markdown fences, exactly this sha
   "tariff_category": "Industrial"|"Commercial"|null,
   "tariff_code": string|null,
   "contract_demand_kva": number|null,
-  "sanctioned_load_kw": number|null,
+  "sanctioned_load_value": number|null,
+  "sanctioned_load_unit": "kW"|"HP"|"kVA"|null,
   "current_month": {
     "total_units": number|null,
     "energy_rate": number|null,
     "wheeling_per_unit": number|null,
     "fac": number|null,
-    "electricity_duty": number|null,
+    "duty_total_amount": number|null,
+    "duty_rate_pct": number|null,
+    "duty_per_unit": number|null,
     "tax_on_sale": number|null,
     "tod": {
       "t00_06": {"units": number|null, "rate": number|null},
@@ -82,12 +85,12 @@ Return ONLY a single JSON object, no prose, no markdown fences, exactly this sha
 }
 
 Rules:
-- All rate fields (energy_rate, wheeling_per_unit, fac, electricity_duty,
+- All rate fields (energy_rate, wheeling_per_unit, fac, duty_per_unit,
   tax_on_sale, and every tod rate) MUST be in RUPEES PER UNIT. MSEDCL prints some
   of these in "Ps/U" (paise per unit). If a value is labelled Ps/U or paise,
   DIVIDE BY 100. Example: "Tax on Sale @ 28.94 Ps/U" -> 0.2894. "FAC @ 20 Ps/U"
-  -> 0.20. Sanity: energy_rate is normally 5–10; fac/duty/tax/wheeling-per-unit
-  are normally well below 1.
+  -> 0.20. Sanity: energy_rate is normally 5–10; fac/tax/wheeling-per-unit/
+  duty_per_unit are normally well below 1.
 - energy_rate is the base energy charge rate for the current month's units (the
   "Energy Charges" rate, or the industrial/commercial consumption rate).
 - wheeling_per_unit: read the RATE from the bill's "Wheeling Charges" line —
@@ -99,16 +102,44 @@ Rules:
   units) and must be ignored entirely; it is never used anywhere in this
   extraction. (This field was named demand_charge_per_unit until real-bill
   testing found that was the wrong label for it — see SPEC.md's Owner notes.)
-- electricity_duty: some industrial bills are duty-exempt and print the duty
-  rate or amount as "0.00", "0", or "Exempt". In that case return 0 (a
-  confirmed, confident value) — do NOT return null and do NOT add
-  "current_month.electricity_duty" to low_confidence_fields for a clearly
-  printed zero/exempt. Only use null (and flag it) if the duty line truly
-  cannot be read at all.
+- duty_total_amount / duty_rate_pct / duty_per_unit: MSEDCL industrial bills
+  typically show duty in TWO places — a rate table with a line like "E.D. on
+  (Rs.) / Rate %" (e.g. 7.50), and a billing-details line labelled
+  "Electricity Duty" showing the monthly TOTAL AMOUNT (e.g. 4178.77). COPY
+  THESE THREE NUMBERS EXACTLY AS PRINTED — do NOT convert or divide ANY of
+  them yourself:
+    - duty_total_amount: the billing-details "Electricity Duty" TOTAL amount
+      for the month, verbatim (e.g. 4178.77).
+    - duty_rate_pct: the rate-table "E.D. on (Rs.) / Rate %" PERCENTAGE,
+      verbatim (e.g. 7.50, not 0.075).
+    - duty_per_unit: ONLY if the bill separately, literally prints a
+      per-unit duty RATE in Rs/unit somewhere (rare) — otherwise null.
+  All server-side math (dividing the total by units, etc.) happens after
+  extraction — your job is to copy the printed numbers, not compute
+  anything. If the bill is duty-exempt (prints "0.00" or "Exempt" for the
+  rate/amount), return duty_rate_pct or duty_total_amount as 0, and do NOT
+  add any duty field to low_confidence_fields for a clearly printed
+  zero/exempt. Only use null (and flag it) if nothing about duty can be
+  read at all. (This field was split from a single model-computed
+  electricity_duty after real-bill testing found the model's own division
+  was nondeterministic — a later run of the SAME bill divided the printed
+  7.50% rate by 100 instead of the total by units, producing a wrong value
+  that happened to sit inside the plausible range with no flag raised. See
+  SPEC.md's Owner notes.)
 - The four TOD (Time of Day) slots are 00:00–06:00, 06:00–09:00, 09:00–17:00,
   17:00–24:00. Each has its own units and its own rate. RATES CAN BE NEGATIVE
   (the daytime 09:00–17:00 slot is usually a rebate, e.g. -1.149). Preserve the
   sign exactly.
+- sanctioned_load_value/sanctioned_load_unit: read the customer's
+  sanctioned/contracted load EXACTLY as printed — the number and its unit
+  separately, verbatim. Do NOT convert units yourself (e.g. do NOT turn
+  "90 HP" into a kW number) — copy the raw value and set the unit to
+  whichever of "kW"/"HP"/"kVA" is actually printed next to it. Do not
+  confuse this with contract_demand_kva (a related but different figure).
+  (Split from a single model-converted sanctioned_load_kw after real-bill
+  testing found the same nondeterminism — the same bill's "90 HP" line came
+  back as raw 90 in one run and a converted 66.1949 in another. See SPEC.md's
+  Owner notes.)
 - billing_history_units: the bill has a "Billing History" table listing months
   and their units. Return the UNITS values, MOST RECENT FIRST, up to 12 numbers.
   Strip commas.
@@ -128,21 +159,35 @@ Ranges (flag if outside):
 - `energy_rate`            : 3 – 12
 - `wheeling_per_unit`      : 0 – 3
 - `fac`                    : 0 – 2
-- `electricity_duty`       : 0 – 2 (an exact `0` is NEVER flagged, even if
-                             the model added it to low_confidence_fields —
-                             duty-exempt bills are a confirmed, valid `0`;
-                             only `null`/out-of-range flags)
+- `electricity_duty`       : 0 – 3 (widened from 0-2 after a real bill's
+                             genuine 7.5%-duty per-unit value of ~0.93 sat
+                             close to the old ceiling; an exact `0` is NEVER
+                             flagged, even if the model added it to
+                             low_confidence_fields — duty-exempt bills are a
+                             confirmed, valid `0`; only `null`/out-of-range
+                             flags)
 - `tax_on_sale`            : 0 – 2
 - each `tod.*.rate`        : -5 – 5
 - `total_units`            : 100 – 1,000,000
 - `contract_demand_kva`    : 1 – 5,000
 
 Cross-checks (flag the involved fields if they fail):
-- **Paise-not-converted detector:** if any of fac / tax_on_sale /
-  wheeling_per_unit is > 5, it was almost certainly left in paise. Flag it,
-  and offer the ÷100 value as a suggested correction on the confirm screen.
-  (`electricity_duty` is excluded from this detector — see its own rule
-  above.)
+- **Amount-vs-rate detector (wheeling_per_unit, fac, electricity_duty):**
+  when one of these is out of its range above, try TWO candidate fixes and
+  offer whichever lands back in range, preferring the first: (1) the value
+  ÷ total_units — it was actually a monthly TOTAL amount mistaken for a
+  per-unit rate (the real bug found on a real bill: Electricity Duty's Rs
+  4178.77 total in the per-unit field); (2) the value ÷ 100 — it was left
+  in paise, not converted to rupees (the older detector, kept as a
+  fallback for fac/tax_on_sale/wheeling, which don't have a printed total
+  amount to divide by 100 in the same way duty does). The confirm screen's
+  one-tap button wording differs depending on which fix is offered ("Use
+  0.93? (amount ÷ units)" vs the plain "Use X?" paise version) so it's
+  never misleading about what the button actually does.
+- **Paise-not-converted detector (tax_on_sale only):** if tax_on_sale is >
+  5, it was almost certainly left in paise. Flag it, and offer the ÷100
+  value as a suggested correction — this field has no natural "total
+  amount" counterpart on the bill, so it only ever gets this one fix.
 - **TOD units reconcile:** sum(tod.t00_06.units, t06_09, t09_17, t17_24) should be
   within ±3% of total_units. If not, flag total_units and all four slot units.
 - **History plausibility:** billing_history_units should be 4–12 entries, all

@@ -30,6 +30,34 @@
   var INCONSISTENT_MESSAGE_COMMERCIAL =
     "Your bill values look inconsistent, please recheck consumption units, sanctioned load, and the charge components.";
 
+  // Output sanity guard, shared by both categories: no real MSEDCL C&I
+  // tariff sits outside this band, so a derived effective_tariff beyond it
+  // means some per-unit field is actually holding a monthly total (or
+  // similar extraction slip) that individually-plausible per-field range
+  // checks didn't catch — cheap insurance against ANY future extraction
+  // mistake, not just the electricity-duty one that motivated it. Thrown as
+  // a distinct error type (not a plain Error) so app.js can specifically
+  // catch it and re-flag the per-unit fields, rather than just show the
+  // message like the generic INCONSISTENT_MESSAGE cases above.
+  var TARIFF_SANITY_LO = 3;
+  var TARIFF_SANITY_HI = 25;
+
+  function TariffSanityError(tariff, fields) {
+    this.name = "TariffSanityError";
+    this.message = "These values produce an unrealistic tariff of ₹" + tariff.toFixed(2) +
+      "/unit — please re-check the highlighted fields.";
+    this.tariff = tariff;
+    this.fields = fields; // dotted-paths of the per-unit fields to re-flag
+  }
+  TariffSanityError.prototype = Object.create(Error.prototype);
+  TariffSanityError.prototype.constructor = TariffSanityError;
+
+  function checkTariffSanity(effectiveTariff, fields) {
+    if (!isFinite(effectiveTariff) || effectiveTariff < TARIFF_SANITY_LO || effectiveTariff > TARIFF_SANITY_HI) {
+      throw new TariffSanityError(effectiveTariff, fields);
+    }
+  }
+
   function isMissing(v) { return v === null || v === undefined; }
 
   /** DAYTIME_FRACTION per SPEC.md's DAYTIME_WINDOW flag. Default "06-17"
@@ -106,6 +134,11 @@
     var effectiveTariff =
       cm.energy_rate + wheelingPerUnit + cm.fac + cm.electricity_duty +
       cm.tax_on_sale - config.gsc + tod.t09_17.rate;
+
+    checkTariffSanity(effectiveTariff, [
+      "current_month.energy_rate", "current_month.wheeling_per_unit", "current_month.fac",
+      "current_month.electricity_duty", "current_month.tax_on_sale", "current_month.tod.t09_17.rate"
+    ]);
 
     var history = Array.isArray(confirmed.billing_history_units) ? confirmed.billing_history_units : [];
     var annualUnits = sumUnits(history);
@@ -224,6 +257,12 @@
       c.energy_rate + wheeling + c.fac + dutyPerUnit + c.tax_on_sale -
       todRebatePerUnit - c.grid_support_charge;
 
+    checkTariffSanity(effectiveTariff, [
+      "commercial.energy_rate", "commercial.wheeling", "commercial.fac",
+      "commercial.electricity_duty_pct", "commercial.tax_on_sale",
+      "commercial.tod_rebate_pct", "commercial.grid_support_charge"
+    ]);
+
     var history = Array.isArray(confirmed.billing_history_units) ? confirmed.billing_history_units : [];
     var annualUnits = sumUnits(history);
     var monthsUsed = history.length;
@@ -303,6 +342,9 @@
     deriveCommercial: deriveCommercial,
     lookupCommercialRatePerKwp: lookupCommercialRatePerKwp,
     INCONSISTENT_MESSAGE: INCONSISTENT_MESSAGE,
-    INCONSISTENT_MESSAGE_COMMERCIAL: INCONSISTENT_MESSAGE_COMMERCIAL
+    INCONSISTENT_MESSAGE_COMMERCIAL: INCONSISTENT_MESSAGE_COMMERCIAL,
+    TariffSanityError: TariffSanityError,
+    TARIFF_SANITY_LO: TARIFF_SANITY_LO,
+    TARIFF_SANITY_HI: TARIFF_SANITY_HI
   };
 })();

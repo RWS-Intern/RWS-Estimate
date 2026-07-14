@@ -24,6 +24,14 @@
   var PDF_MAX_PAGES = 8;         // sanity cap — real MSEDCL bills run 2-4 pages
   var PDF_WORKER_SRC = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 
+  // Belt-and-braces alongside api/extract.php's own genericization: even if
+  // the server ever sent something in json.error again (a future bug), the
+  // client still never renders it — customers must never see provider/
+  // internal error text. Always show this fixed line instead, regardless
+  // of what (if anything) the server's error field contains.
+  var GENERIC_EXTRACTION_ERROR =
+    "We couldn't read your bill automatically this time — please fill in the values below from your bill, or try uploading a clearer photo.";
+
   if (window.pdfjsLib) {
     window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER_SRC;
   }
@@ -506,10 +514,12 @@
       submitBtn.disabled = false;
       if (json && json.success) {
         uploadBillFile(frontFile, backFile);
-        renderConfirmForm(json.data, json.needs_review || {}, json.suggested_corrections || {}, json.quality || "ok", null);
+        renderConfirmForm(json.data, json.needs_review || {}, json.suggested_corrections || {}, json.quality || "ok", null, json.correction_reasons || {});
       } else {
-        renderConfirmForm(blankExtraction(), {}, {}, "poor",
-          (json && json.error) || "We couldn't read this bill. Please fill in the values below manually.");
+        // Never render json.error verbatim, even though the server should
+        // no longer be sending provider/internal detail in it at all —
+        // belt and braces (see GENERIC_EXTRACTION_ERROR above).
+        renderConfirmForm(blankExtraction(), {}, {}, "poor", GENERIC_EXTRACTION_ERROR);
       }
       showStep("step-confirm");
     }).catch(function (err) {
@@ -532,6 +542,11 @@
     return {
       consumer_number: null, consumer_name: null, tariff_category: null,
       tariff_code: null, contract_demand_kva: null, sanctioned_load_kw: null,
+      // Display-only hint from api/extract.php's resolve_sanctioned_load_kw()
+      // — e.g. "90 HP on bill → 66.2 kW" — shown under the sanctioned load
+      // field, never collected back (the confirm screen still only edits
+      // the single converted kW number).
+      sanctioned_load_note: null,
       current_month: {
         total_units: null, energy_rate: null, wheeling_per_unit: null,
         fac: null, electricity_duty: null, tax_on_sale: null,
@@ -558,8 +573,13 @@
 
   /** Wraps one labelled input in its .field div, and — when needsReview is
    *  true — an amber "please check" note with an optional one-tap
-   *  suggested-correction button (the ÷100 paise fix, etc). */
-  function makeFieldDiv(label, inputEl, needsReview, suggestion) {
+   *  suggested-correction button (the ÷100 paise fix, or an amount÷units
+   *  fix — reason picks the button's wording so it never misdescribes
+   *  what tapping it actually does). `hint`, if given, is a plain
+   *  informational line shown regardless of needsReview (e.g. "90 HP on
+   *  bill → 66.2 kW") — transparency about a deterministic conversion
+   *  that already happened, not something to fix. */
+  function makeFieldDiv(label, inputEl, needsReview, suggestion, reason, hint) {
     var wrap = document.createElement("div");
     wrap.className = "field";
     if (needsReview) wrap.classList.add("reviewme");
@@ -568,6 +588,13 @@
     lbl.textContent = label;
     wrap.appendChild(lbl);
     wrap.appendChild(inputEl);
+
+    if (hint) {
+      var hintEl = document.createElement("div");
+      hintEl.className = "hint";
+      hintEl.textContent = hint;
+      wrap.appendChild(hintEl);
+    }
 
     if (needsReview) {
       var note = document.createElement("div");
@@ -579,7 +606,8 @@
         var btn = document.createElement("button");
         btn.type = "button";
         btn.className = "fixit-btn";
-        btn.textContent = "Use " + suggestion + "?";
+        var suffix = reason === "amount_div_units" ? " (amount ÷ units)" : "";
+        btn.textContent = "Use " + suggestion + "?" + suffix;
         btn.addEventListener("click", function () {
           inputEl.value = suggestion;
           wrap.classList.remove("reviewme");
@@ -606,7 +634,7 @@
       { path: "tariff_category", label: "Category", type: "select", value: data.tariff_category },
       { path: "tariff_code", label: "Tariff code", type: "text", value: data.tariff_code },
       { path: "contract_demand_kva", label: "Contract demand (kVA)", type: "number", value: data.contract_demand_kva },
-      { path: "sanctioned_load_kw", label: "Sanctioned load (kW)", type: "number", value: data.sanctioned_load_kw }
+      { path: "sanctioned_load_kw", label: "Sanctioned load (kW)", type: "number", value: data.sanctioned_load_kw, hint: data.sanctioned_load_note }
     ];
     var items = specs.map(function (spec) {
       var input;
@@ -636,13 +664,14 @@
         input.value = fmtInput(spec.value);
       }
       var needsReview = !!nr[spec.path];
-      var el = makeFieldDiv(spec.label, input, needsReview, sugg[spec.path]);
+      var el = makeFieldDiv(spec.label, input, needsReview, sugg[spec.path], undefined, spec.hint);
       return { el: el, isNull: isNullish(spec.value) };
     });
     stableNullFirstSort(items).forEach(function (it) { container.appendChild(it.el); });
   }
 
-  function buildRateFields(data, nr, sugg) {
+  function buildRateFields(data, nr, sugg, reasons) {
+    reasons = reasons || {};
     var container = document.getElementById("rateFieldsGrid");
     container.innerHTML = "";
     var cm = data.current_month || {};
@@ -668,7 +697,7 @@
       input.id = idFor[spec.path];
       input.value = fmtInput(spec.value);
       var needsReview = !!nr[spec.path];
-      var el = makeFieldDiv(spec.label, input, needsReview, sugg[spec.path]);
+      var el = makeFieldDiv(spec.label, input, needsReview, sugg[spec.path], reasons[spec.path]);
       return { el: el, isNull: isNullish(spec.value) };
     });
     stableNullFirstSort(items).forEach(function (it) { container.appendChild(it.el); });
@@ -681,7 +710,8 @@
    *  field here too — real bills showed that was the SAME bill line as
    *  wheeling under a wrong label, so it was removed; wheeling is the only
    *  field for it now.) */
-  function buildCommercialRateFields(data, nr, sugg) {
+  function buildCommercialRateFields(data, nr, sugg, reasons) {
+    reasons = reasons || {};
     var container = document.getElementById("rateFieldsGrid");
     container.innerHTML = "";
     var c = data.commercial || {};
@@ -701,7 +731,7 @@
       input.id = "c-" + spec.idSuffix;
       input.value = fmtInput(spec.value);
       var needsReview = !!nr[spec.path];
-      var el = makeFieldDiv(spec.label, input, needsReview, sugg[spec.path]);
+      var el = makeFieldDiv(spec.label, input, needsReview, sugg[spec.path], reasons[spec.path]);
       return { el: el, isNull: isNullish(spec.value) };
     });
     stableNullFirstSort(items).forEach(function (it) { container.appendChild(it.el); });
@@ -751,13 +781,14 @@
    *  the one branch point every caller of the rate-fields UI goes through
    *  (renderConfirmForm() on initial load, the category-select's change
    *  handler in buildCustomerFields() on a manual flip). */
-  function renderRateSection(data, nr, sugg) {
+  function renderRateSection(data, nr, sugg, reasons) {
+    reasons = reasons || {};
     var todSection = document.getElementById("todSection");
     if (data.tariff_category === "Commercial") {
-      buildCommercialRateFields(data, nr, sugg);
+      buildCommercialRateFields(data, nr, sugg, reasons);
       todSection.style.display = "none";
     } else {
-      buildRateFields(data, nr, sugg);
+      buildRateFields(data, nr, sugg, reasons);
       buildTodRows(data, nr);
       todSection.style.display = "";
     }
@@ -800,7 +831,8 @@
     stableNullFirstSort(items).forEach(function (it) { grid.appendChild(it.el); });
   }
 
-  function renderConfirmForm(data, needsReview, suggestedCorrections, quality, errorMessage) {
+  function renderConfirmForm(data, needsReview, suggestedCorrections, quality, errorMessage, correctionReasons) {
+    correctionReasons = correctionReasons || {};
     var note = document.getElementById("confirmNote");
     note.innerHTML = "";
 
@@ -834,7 +866,7 @@
     }
 
     buildCustomerFields(data, needsReview, suggestedCorrections);
-    renderRateSection(data, needsReview, suggestedCorrections);
+    renderRateSection(data, needsReview, suggestedCorrections, correctionReasons);
     buildHistoryItems(data, needsReview);
   }
 
@@ -1177,6 +1209,17 @@
       } catch (e) {
         formulationErrorEl.textContent = e.message;
         formulationErrorEl.style.display = "block";
+        // TariffSanityError (unrealistic effective_tariff — e.g. a monthly
+        // total mistaken for a per-unit rate) additionally re-flags the
+        // per-unit fields that fed it, so it's obvious on screen which
+        // values to recheck, not just a generic error line. Rebuilds from
+        // `confirmed` (what the user just submitted), so entered values are
+        // preserved — only the amber "please check" highlighting is added.
+        if (e instanceof RiteFormulation.TariffSanityError) {
+          var reflagged = {};
+          e.fields.forEach(function (path) { reflagged[path] = true; });
+          renderRateSection(confirmed, reflagged, {}, {});
+        }
         return;
       }
 

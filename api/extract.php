@@ -42,13 +42,59 @@ function respond_error($message, $httpCode = 200) {
     respond(array('success' => false, 'error' => $message), $httpCode);
 }
 
+// Customers must NEVER see provider/internal error text — no provider
+// names, no upstream error strings, no HTTP codes, ever. Every extraction
+// failure (vision call, network, timeout, malformed response, missing
+// server config, an uncaught PHP error) shows this one fixed line; the
+// real detail always goes to error_log() instead, never to the client.
+const GENERIC_EXTRACTION_ERROR =
+    "We couldn't read your bill automatically this time — please fill in the values below from your bill, or try uploading a clearer photo.";
+
+/** Best-effort detection of a credit/quota/rate-limit error from the vision
+ *  provider — an OPS EMERGENCY (extraction is down for EVERY customer, not
+ *  just this one bad image), so it's logged at a distinct, greppable
+ *  prefix ("EXTRACT_QUOTA:") instead of the routine per-bill failure
+ *  prefix. Detected by keyword match on the raw error text — the provider
+ *  call sites here don't separately preserve the HTTP status code by the
+ *  time it reaches a catch block, and the message text alone is reliable
+ *  enough for this (e.g. "Your credit balance is too low...", a 429
+ *  "rate_limit_error" body, "quota"). */
+function is_quota_or_credit_error($message) {
+    $m = strtolower((string) $message);
+    foreach (array('credit balance', 'insufficient credit', 'quota', 'rate limit', 'rate_limit', 'purchase credits', 'too many requests') as $needle) {
+        if (strpos($m, $needle) !== false) return true;
+    }
+    return false;
+}
+
+/** Logs the FULL raw error server-side (never shown to the client) and
+ *  responds with the one fixed, generic, non-leaking message — the single
+ *  place every extraction-failure path in this file funnels through, so
+ *  there's exactly one spot to audit for "does this ever leak detail."
+ *  $context is a short label identifying which call site this came from
+ *  (e.g. "commercial vision", "industrial vision", "uncaught exception").
+ *  $correlate is the best identifier on hand to help match a customer's
+ *  complaint to this log line — api/lead.php's Supabase insert (which
+ *  creates the real submission id) fires in PARALLEL with this endpoint
+ *  from app.js, deliberately, so extraction is never blocked waiting on
+ *  it; no real submission id exists yet at this point in the flow. The
+ *  mobile number posted alongside the bill is the best available
+ *  substitute for correlating logs to a customer. */
+function fail_extraction_generic($context, $rawDetail, $correlate) {
+    $prefix = is_quota_or_credit_error($rawDetail) ? 'EXTRACT_QUOTA' : 'EXTRACT_FAIL';
+    error_log('[' . $prefix . '] ' . $context . ' mobile=' . $correlate . ' detail=' . $rawDetail);
+    respond_error(GENERIC_EXTRACTION_ERROR);
+}
+
 set_exception_handler(function ($e) {
-    respond_error('Server error while reading the bill: ' . $e->getMessage());
+    error_log('[EXTRACT_FAIL] uncaught exception: ' . $e->getMessage() . ' at ' . $e->getFile() . ':' . $e->getLine());
+    respond_error(GENERIC_EXTRACTION_ERROR);
 });
 register_shutdown_function(function () {
     $err = error_get_last();
     if ($err && in_array($err['type'], array(E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR), true)) {
-        respond_error('Server error while reading the bill.');
+        error_log('[EXTRACT_FAIL] fatal: ' . $err['message'] . ' at ' . $err['file'] . ':' . $err['line']);
+        respond_error(GENERIC_EXTRACTION_ERROR);
     }
 });
 
@@ -148,6 +194,12 @@ foreach ($imageEntries as $entry) {
  *  only behavior, unchanged. */
 $category = isset($_POST['category']) ? trim($_POST['category']) : '';
 
+/** No real submission id exists at this point (see fail_extraction_generic()'s
+ *  doc comment) — app.js also posts the entry form's mobile number
+ *  alongside the bill, which is the best available identifier for
+ *  correlating a customer's complaint to a server log line. */
+$correlationId = isset($_POST['mobile']) ? trim($_POST['mobile']) : 'unknown';
+
 function blank_extraction() {
     return array(
         'consumer_number' => null,
@@ -156,6 +208,16 @@ function blank_extraction() {
         'tariff_code' => null,
         'contract_demand_kva' => null,
         'sanctioned_load_kw' => null,
+        // Set by resolve_sanctioned_load_kw() when the bill's unit was HP
+        // (informational — "90 HP on bill -> 66.2 kW") or kVA (cautionary —
+        // used as-is, flagged for review). Null when already kW, or when
+        // nothing was printed. Display-only; not itself validated/collected
+        // back from the confirm screen.
+        'sanctioned_load_note' => null,
+        // Internal signal from resolve_sanctioned_load_kw() (kVA case) to
+        // validate_extraction() — OR'd into the sanctioned_load_kw flag.
+        // Not a canonical field in its own right.
+        'sanctioned_load_needs_review' => false,
         'current_month' => array(
             'total_units' => null,
             'energy_rate' => null,
@@ -223,6 +285,101 @@ function suggest_paise_correction($v) {
 }
 
 /**
+ * For an out-of-range per-unit field, tries two candidate fixes and returns
+ * whichever lands inside [$lo, $hi] — preferring amount÷units (a monthly
+ * TOTAL mistaken for a per-unit rate, e.g. a real MSEDCL bill's Electricity
+ * Duty total of Rs 4178.77 landing in the per-unit field instead of the
+ * printed 7.5% rate) over the older ÷100 paise-not-converted fix. Returns
+ * null if neither candidate lands in range. Return shape: {value, reason}
+ * where reason is 'amount_div_units' or 'paise_div_100' — the confirm
+ * screen uses this to word the one-tap button correctly instead of a
+ * generic "Use X?" that would be misleading for an amount÷units fix.
+ */
+function suggest_per_unit_correction($v, $divisorUnits, $lo, $hi) {
+    if ($v === null) return null;
+    if ($divisorUnits !== null && $divisorUnits > 0) {
+        $byUnits = round($v / $divisorUnits, 4);
+        if (in_range($byUnits, $lo, $hi)) {
+            return array('value' => $byUnits, 'reason' => 'amount_div_units');
+        }
+    }
+    if ($v > 5) {
+        return array('value' => suggest_paise_correction($v), 'reason' => 'paise_div_100');
+    }
+    return null;
+}
+
+/**
+ * Deterministic priority-order derivation of the per-unit electricity duty
+ * from THREE raw, verbatim-copied bill signals — replaces model-side
+ * arithmetic entirely. Model-side conversion is nondeterministic: on a real
+ * bill (Shriram Stone Crusher), one vision run divided the bill's printed
+ * "E.D. on (Rs.) / Rate %" figure (7.50) by 100 -> 0.075, landing INSIDE
+ * the 0-3 plausible band with no flag raised, instead of the correct
+ * duty_total_amount / total_units = 4178.77 / 4510 = 0.9266. Only ever
+ * called on FRESH extraction data (at least one of the three raw signals
+ * present) — an old-shaped row/replay with just a flat electricity_duty
+ * and none of these three bypasses this function entirely, preserving
+ * today's pre-existing behavior for that value (see sanitize_extraction()).
+ *
+ *   (a) duty_per_unit, if the bill literally prints one AND it's plausible.
+ *   (b) duty_total_amount / total_units — the deterministic fix for the
+ *       bug above.
+ *   (c) deliberately SKIPPED: duty_rate_pct% needs the bill's assessable
+ *       base amount, which varies bill to bill — too fragile to guess.
+ *       Falls through to null (flagged for manual entry by
+ *       validate_extraction()'s existing null-check) rather than a
+ *       maybe-wrong computed value.
+ *   (d) nothing usable printed, or a genuinely exempt bill -> 0.
+ */
+function resolve_electricity_duty($dutyPerUnit, $dutyTotalAmount, $dutyRatePct, $totalUnits) {
+    if ($dutyPerUnit !== null && in_range($dutyPerUnit, 0, 3)) {
+        return $dutyPerUnit;
+    }
+    if ($dutyTotalAmount !== null && $totalUnits !== null && $totalUnits > 0) {
+        return round($dutyTotalAmount / $totalUnits, 4);
+    }
+    if ($dutyPerUnit === null && $dutyTotalAmount === null && ($dutyRatePct === null || $dutyRatePct == 0)) {
+        return 0.0;
+    }
+    return null;
+}
+
+/**
+ * Deterministic HP/kVA/kW -> kW conversion for sanctioned load — replaces
+ * model-side conversion entirely. Nondeterministic on a real bill: the same
+ * "90 HP" line was returned as raw 90 in one vision run and as a converted
+ * 66.1949 in another. Returns ['value' => kw|null, 'note' =>
+ * string|null, 'needs_review' => bool]. kVA is NOT converted to kW (that
+ * needs the bill's power factor, which isn't printed) — passed through
+ * as-is but flagged so a human confirms it, rather than silently treating
+ * kVA as kW.
+ */
+function resolve_sanctioned_load_kw($value, $unit) {
+    if ($value === null) {
+        return array('value' => null, 'note' => null, 'needs_review' => false);
+    }
+    $u = is_string($unit) ? strtoupper(trim($unit)) : null;
+    if ($u === 'HP') {
+        $kw = round($value * 0.7355, 4);
+        return array(
+            'value' => $kw,
+            'note' => $value . ' HP on bill → ' . round($kw, 1) . ' kW',
+            'needs_review' => false,
+        );
+    }
+    if ($u === 'KVA') {
+        return array(
+            'value' => $value,
+            'note' => $value . ' kVA on bill — used as kW as printed; please verify (kVA is apparent power, not the same as kW without the bill\'s power factor)',
+            'needs_review' => true,
+        );
+    }
+    // 'KW' or unrecognized/missing unit: trust the printed value as-is.
+    return array('value' => $value, 'note' => null, 'needs_review' => false);
+}
+
+/**
  * Applies every rule in extraction_hardening.md's "VALIDATION RULES"
  * section. Returns:
  *   needs_review           dotted-path => bool (canonical fields + the
@@ -235,6 +392,7 @@ function suggest_paise_correction($v) {
 function validate_extraction($data, $modelFlags = array()) {
     $nr = array();
     $sugg = array();
+    $reasons = array();
     $cm = $data['current_month'];
     $tod = $cm['tod'];
 
@@ -244,32 +402,49 @@ function validate_extraction($data, $modelFlags = array()) {
 
     // Fields with no range check of their own — flagged only if null or the
     // model itself said it was unsure.
-    foreach (array('consumer_number', 'consumer_name', 'tariff_category', 'tariff_code', 'sanctioned_load_kw') as $k) {
+    foreach (array('consumer_number', 'consumer_name', 'tariff_category', 'tariff_code') as $k) {
         $flag($k, false, $data[$k]);
     }
+    // sanctioned_load_kw additionally flags when resolve_sanctioned_load_kw()
+    // used a kVA figure as-is (no power factor to convert it properly) —
+    // industrial doesn't size off this the way commercial does, but it's
+    // still customer-facing data worth a human glance.
+    $flag('sanctioned_load_kw', !empty($data['sanctioned_load_needs_review']), $data['sanctioned_load_kw']);
 
     $flag('contract_demand_kva', !in_range($data['contract_demand_kva'], 1, 5000) && $data['contract_demand_kva'] !== null, $data['contract_demand_kva']);
     $flag('current_month.total_units', !in_range($cm['total_units'], 100, 1000000) && $cm['total_units'] !== null, $cm['total_units']);
     $flag('current_month.energy_rate', !in_range($cm['energy_rate'], 3, 12) && $cm['energy_rate'] !== null, $cm['energy_rate']);
 
-    // The small rate fields also get the paise-not-converted detector: if
-    // the value is > 5 it was almost certainly left in paise (SPEC.md /
-    // extraction_hardening.md). Offer the ÷100 value as a one-tap fix rather
-    // than silently rewriting what the user sees. electricity_duty is
-    // handled separately below (a confirmed 0 — duty-exempt bills exist —
-    // must never be flagged, unlike these three).
-    $paiseRanges = array(
-        'current_month.wheeling_per_unit' => array(0, 3),
-        'current_month.fac' => array(0, 2),
-        'current_month.tax_on_sale' => array(0, 2),
+    // tax_on_sale keeps the simple ÷100-paise-only fix — no natural
+    // "monthly total instead of per-unit" counterpart for this field on
+    // the bill, unlike wheeling/fac/duty below.
+    $taxOnSale = $cm['tax_on_sale'];
+    $taxFailed = ($taxOnSale !== null && !in_range($taxOnSale, 0, 2));
+    $flag('current_month.tax_on_sale', $taxFailed, $taxOnSale);
+    if ($taxOnSale !== null && $taxOnSale > 5) {
+        $sugg['current_month.tax_on_sale'] = suggest_paise_correction($taxOnSale);
+    }
+
+    // wheeling_per_unit, fac, and electricity_duty can all suffer the
+    // failure mode seen on a real bill: a monthly TOTAL amount (e.g.
+    // Electricity Duty's Rs 4178.77) mistaken for the per-unit rate,
+    // producing a wildly inflated effective tariff. Try amount÷total_units
+    // first, fall back to the ÷100 paise fix — suggest_per_unit_correction()
+    // picks whichever lands in range. electricity_duty's flagging rule is
+    // still special-cased below it (a confirmed 0 must never flag).
+    $totalUnits = $cm['total_units'];
+    $amountOrPaiseFields = array(
+        'current_month.wheeling_per_unit' => array($cm['wheeling_per_unit'], 0, 3),
+        'current_month.fac' => array($cm['fac'], 0, 2),
     );
-    foreach ($paiseRanges as $path => $range) {
-        $segs = explode('.', $path);
-        $v = $cm[$segs[1]];
-        $failed = ($v !== null && !in_range($v, $range[0], $range[1]));
+    foreach ($amountOrPaiseFields as $path => $spec) {
+        list($v, $lo, $hi) = $spec;
+        $failed = ($v !== null && !in_range($v, $lo, $hi));
         $flag($path, $failed, $v);
-        if ($v !== null && $v > 5) {
-            $sugg[$path] = suggest_paise_correction($v);
+        $correction = suggest_per_unit_correction($v, $totalUnits, $lo, $hi);
+        if ($correction !== null) {
+            $sugg[$path] = $correction['value'];
+            $reasons[$path] = $correction['reason'];
         }
     }
 
@@ -278,12 +453,17 @@ function validate_extraction($data, $modelFlags = array()) {
     // it must never trigger the amber "please check" flag, even if the
     // model itself added it to low_confidence_fields out of caution. A
     // genuinely missing (null) or out-of-range duty still flags normally.
+    // Range widened 0-2 -> 0-3: a real bill charging 7.5% duty produced a
+    // genuine per-unit value of ~0.93, and 0-2 was cutting it uncomfortably
+    // close to plausible real values, not just catching mistakes.
     $duty = $cm['electricity_duty'];
-    $dutyFailed = ($duty !== null && !in_range($duty, 0, 2));
+    $dutyFailed = ($duty !== null && !in_range($duty, 0, 3));
     $nr['current_month.electricity_duty'] = ($duty === null) || $dutyFailed ||
         ($duty != 0 && model_flagged('current_month.electricity_duty', $modelFlags));
-    if ($duty !== null && $duty > 5) {
-        $sugg['current_month.electricity_duty'] = suggest_paise_correction($duty);
+    $dutyCorrection = suggest_per_unit_correction($duty, $totalUnits, 0, 3);
+    if ($dutyCorrection !== null) {
+        $sugg['current_month.electricity_duty'] = $dutyCorrection['value'];
+        $reasons['current_month.electricity_duty'] = $dutyCorrection['reason'];
     }
 
     foreach (TOD_SLOT_KEYS as $slot) {
@@ -302,10 +482,10 @@ function validate_extraction($data, $modelFlags = array()) {
     }
 
     // TOD units reconcile: the four slot units should sum to within ±3% of
-    // total_units. Only checkable when all five values are present.
+    // total_units ($totalUnits already declared above). Only checkable when
+    // all five values are present.
     $u00 = $tod['t00_06']['units']; $u06 = $tod['t06_09']['units'];
     $u09 = $tod['t09_17']['units']; $u17 = $tod['t17_24']['units'];
-    $totalUnits = $cm['total_units'];
     if ($u00 !== null && $u06 !== null && $u09 !== null && $u17 !== null && $totalUnits !== null && $totalUnits > 0) {
         $sum4 = $u00 + $u06 + $u09 + $u17;
         if (abs($sum4 - $totalUnits) > 0.03 * $totalUnits) {
@@ -350,6 +530,7 @@ function validate_extraction($data, $modelFlags = array()) {
     return array(
         'needs_review' => $nr,
         'suggested_corrections' => $sugg,
+        'correction_reasons' => $reasons,
         'quality' => $quality,
         'all_pass' => $allPass,
     );
@@ -390,6 +571,27 @@ function find_number($text, $labelPattern, $window = 150) {
     if ($raw === null) return null;
     $clean = str_replace(',', '', $raw);
     return is_numeric($clean) ? (float) $clean : null;
+}
+
+/** Like find_number(), but also captures a unit suffix (kW/HP/kVA) if one
+ *  immediately follows the number — e.g. "Sanctioned Load: 90 HP". Used so
+ *  the text-parser fast path can feed resolve_sanctioned_load_kw() the same
+ *  verbatim value+unit pair the vision path now provides, instead of
+ *  guessing a unit or leaving it null. Best-effort/unverified against a
+ *  real bill's text layer, like the rest of this fast path. */
+function find_number_and_unit($text, $labelPattern, $window = 150) {
+    if (!preg_match('/' . $labelPattern . '/i', $text, $m, PREG_OFFSET_CAPTURE)) {
+        return array(null, null);
+    }
+    $start = $m[0][1] + strlen($m[0][0]);
+    $snippet = substr($text, $start, $window);
+    if (!preg_match('/(-?[\d,]+\.?\d*)\s*(kW|HP|kVA)?/i', $snippet, $vm)) {
+        return array(null, null);
+    }
+    $clean = str_replace(',', '', $vm[1]);
+    $value = is_numeric($clean) ? (float) $clean : null;
+    $unit = (isset($vm[2]) && $vm[2] !== '') ? $vm[2] : null;
+    return array($value, $unit);
 }
 
 function find_two_numbers($text, $labelPattern, $window = 250) {
@@ -438,7 +640,11 @@ function parse_bill_text($text) {
     }
 
     $data['contract_demand_kva'] = find_number($text, 'Contract\s*Demand\s*[:\-]?\s*');
-    $data['sanctioned_load_kw'] = find_number($text, 'Sanctioned\s*Load\s*[:\-]?\s*');
+    list($sanctionedValue, $sanctionedUnit) = find_number_and_unit($text, 'Sanctioned\s*Load\s*[:\-]?\s*');
+    $sanctionedResolved = resolve_sanctioned_load_kw($sanctionedValue, $sanctionedUnit);
+    $data['sanctioned_load_kw'] = $sanctionedResolved['value'];
+    $data['sanctioned_load_note'] = $sanctionedResolved['note'];
+    $data['sanctioned_load_needs_review'] = $sanctionedResolved['needs_review'];
 
     $cm = &$data['current_month'];
     $cm['total_units'] = find_number($text, 'Total\s*(?:Units|Consumption)\s*[:\-]?\s*');
@@ -457,7 +663,16 @@ function parse_bill_text($text) {
     }
 
     $cm['fac'] = find_number($text, 'FAC\s*(?:@|Rate)?\s*[:\-]?\s*');
-    $cm['electricity_duty'] = find_number($text, 'Electricity\s*Duty\s*[:\-]?\s*');
+
+    // Same three-signal, no-arithmetic approach as the vision path (see
+    // resolve_electricity_duty()) — best-effort/unverified against a real
+    // bill's text layer, like the rest of this fast path. No distinct
+    // "per-unit duty" label pattern exists here (rare on real bills), so
+    // only the total amount and the rate-table percentage are attempted.
+    $dutyTotalAmount = find_number($text, 'Electricity\s*Duty\s*(?:Amount)?\s*[:\-]?\s*(?:Rs\.?|₹)?\s*');
+    $dutyRatePct = find_number($text, 'E\.?D\.?\s*(?:on\s*\(?Rs\.?\)?\s*)?\/?\s*Rate\s*%?\s*[:\-]?\s*');
+    $cm['electricity_duty'] = resolve_electricity_duty(null, $dutyTotalAmount, $dutyRatePct, $cm['total_units']);
+
     $cm['tax_on_sale'] = find_number($text, 'Tax\s*on\s*Sale\s*[:\-]?\s*');
 
     $todLabels = array(
@@ -495,6 +710,10 @@ function blank_commercial_extraction() {
         'tariff_code' => null,
         'contract_demand_kva' => null,
         'sanctioned_load_kw' => null,
+        // See blank_extraction()'s identical fields for what these are —
+        // sanctioned load resolution is shared/identical across categories.
+        'sanctioned_load_note' => null,
+        'sanctioned_load_needs_review' => false,
         'commercial' => array(
             'current_month_units' => null,
             'energy_rate' => null,
@@ -550,6 +769,7 @@ function validate_commercial_billing_history($hist, $modelFlags, &$nr, &$sugg) {
 function validate_commercial_extraction($data, $modelFlags = array()) {
     $nr = array();
     $sugg = array();
+    $reasons = array();
     $c = isset($data['commercial']) && is_array($data['commercial']) ? $data['commercial'] : array();
 
     $flag = function ($path, $failedCheck, $value) use (&$nr, $modelFlags) {
@@ -560,23 +780,43 @@ function validate_commercial_extraction($data, $modelFlags = array()) {
         $flag($k, false, isset($data[$k]) ? $data[$k] : null);
     }
     $sanctioned = isset($data['sanctioned_load_kw']) ? $data['sanctioned_load_kw'] : null;
-    $flag('sanctioned_load_kw', $sanctioned !== null && !in_range($sanctioned, 0.1, 5000), $sanctioned);
+    // OR in resolve_sanctioned_load_kw()'s kVA-passthrough signal — sizing
+    // is capped by this value for commercial, so a kVA figure used as-is
+    // (no power factor to convert it properly) needs a human to confirm it.
+    $sanctionedNeedsReview = !empty($data['sanctioned_load_needs_review']);
+    $flag('sanctioned_load_kw', ($sanctioned !== null && !in_range($sanctioned, 0.1, 5000)) || $sanctionedNeedsReview, $sanctioned);
 
     $flag('commercial.current_month_units', !in_range($c['current_month_units'], 50, 1000000) && $c['current_month_units'] !== null, isset($c['current_month_units']) ? $c['current_month_units'] : null);
     $flag('commercial.energy_rate', !in_range($c['energy_rate'], 3, 15) && $c['energy_rate'] !== null, isset($c['energy_rate']) ? $c['energy_rate'] : null);
     $flag('commercial.electricity_duty_pct', !in_range($c['electricity_duty_pct'], 0, 30) && $c['electricity_duty_pct'] !== null, isset($c['electricity_duty_pct']) ? $c['electricity_duty_pct'] : null);
     $flag('commercial.tod_rebate_pct', !in_range($c['tod_rebate_pct'], 0, 50) && $c['tod_rebate_pct'] !== null, isset($c['tod_rebate_pct']) ? $c['tod_rebate_pct'] : null);
 
-    // Small Rs/unit fields also get the paise-not-converted detector, same
-    // heuristic and same ÷100 one-tap fix as validate_extraction()'s four
-    // small-rate fields.
-    $paiseRanges = array('wheeling' => array(0, 5), 'fac' => array(0, 3), 'tax_on_sale' => array(0, 3), 'grid_support_charge' => array(0, 5));
-    foreach ($paiseRanges as $key => $range) {
+    // tax_on_sale/grid_support_charge keep the simple ÷100-paise-only fix —
+    // no natural "monthly total instead of per-unit" counterpart for these
+    // on the bill, unlike wheeling/fac below.
+    $simplePaiseRanges = array('tax_on_sale' => array(0, 3), 'grid_support_charge' => array(0, 5));
+    foreach ($simplePaiseRanges as $key => $range) {
         $v = isset($c[$key]) ? $c[$key] : null;
         $failed = ($v !== null && !in_range($v, $range[0], $range[1]));
         $flag('commercial.' . $key, $failed, $v);
         if ($v !== null && $v > 5) {
             $sugg['commercial.' . $key] = suggest_paise_correction($v);
+        }
+    }
+
+    // wheeling and fac can suffer the same failure mode found on a real
+    // industrial bill (a monthly TOTAL amount mistaken for the per-unit
+    // rate) — try amount÷current_month_units first, fall back to ÷100.
+    $currentMonthUnits = isset($c['current_month_units']) ? $c['current_month_units'] : null;
+    $amountOrPaiseRanges = array('wheeling' => array(0, 5), 'fac' => array(0, 3));
+    foreach ($amountOrPaiseRanges as $key => $range) {
+        $v = isset($c[$key]) ? $c[$key] : null;
+        $failed = ($v !== null && !in_range($v, $range[0], $range[1]));
+        $flag('commercial.' . $key, $failed, $v);
+        $correction = suggest_per_unit_correction($v, $currentMonthUnits, $range[0], $range[1]);
+        if ($correction !== null) {
+            $sugg['commercial.' . $key] = $correction['value'];
+            $reasons['commercial.' . $key] = $correction['reason'];
         }
     }
 
@@ -595,6 +835,7 @@ function validate_commercial_extraction($data, $modelFlags = array()) {
     return array(
         'needs_review' => $nr,
         'suggested_corrections' => $sugg,
+        'correction_reasons' => $reasons,
         'quality' => $quality,
         'all_pass' => $allPass,
     );
@@ -609,7 +850,8 @@ function commercial_vision_output_schema() {
             'tariff_category' => array('type' => array('string', 'null')),
             'tariff_code' => array('type' => array('string', 'null')),
             'contract_demand_kva' => array('type' => array('number', 'null')),
-            'sanctioned_load_kw' => array('type' => array('number', 'null')),
+            'sanctioned_load_value' => array('type' => array('number', 'null')),
+            'sanctioned_load_unit' => array('type' => array('string', 'null')),
             'commercial' => array(
                 'type' => 'object',
                 'properties' => array(
@@ -633,7 +875,7 @@ function commercial_vision_output_schema() {
         ),
         'required' => array(
             'consumer_number', 'consumer_name', 'tariff_category', 'tariff_code',
-            'contract_demand_kva', 'sanctioned_load_kw', 'commercial',
+            'contract_demand_kva', 'sanctioned_load_value', 'sanctioned_load_unit', 'commercial',
             'billing_history_units', 'low_confidence_fields',
         ),
         'additionalProperties' => false,
@@ -663,7 +905,8 @@ Return ONLY a single JSON object, no prose, no markdown fences, exactly this sha
   "tariff_category": "Commercial"|null,
   "tariff_code": string|null,
   "contract_demand_kva": number|null,
-  "sanctioned_load_kw": number|null,
+  "sanctioned_load_value": number|null,
+  "sanctioned_load_unit": "kW"|"HP"|"kVA"|null,
   "commercial": {
     "current_month_units": number|null,
     "energy_rate": number|null,
@@ -696,9 +939,12 @@ Rules:
   Rebate 15%" -> 15). If the bill only shows a rupee amount for this rather
   than a labelled percentage, infer it as amount / (energy_rate *
   current_month_units) * 100.
-- sanctioned_load_kw: the customer's sanctioned/contracted load in kW — read
-  it carefully, do not confuse with contract_demand_kva (a related but
-  different figure in kVA).
+- sanctioned_load_value/sanctioned_load_unit: read the customer's
+  sanctioned/contracted load EXACTLY as printed — the number and its unit
+  separately, verbatim. Do NOT convert units yourself (e.g. do NOT turn
+  "90 HP" into a kW number) — copy the raw value and set the unit to
+  whichever of "kW"/"HP"/"kVA" is actually printed next to it. Do not
+  confuse this with contract_demand_kva (a related but different figure).
 - billing_history_units: the bill has a "Billing History" table listing months
   and their units. Return the UNITS values, MOST RECENT FIRST, up to 12
   numbers. Strip thousands separators.
@@ -721,8 +967,23 @@ function sanitize_commercial_extraction($data) {
             $out[$k] = trim($data[$k]);
         }
     }
-    foreach (array('contract_demand_kva', 'sanctioned_load_kw') as $k) {
-        if (isset($data[$k]) && is_numeric($data[$k])) $out[$k] = (float) $data[$k];
+    if (isset($data['contract_demand_kva']) && is_numeric($data['contract_demand_kva'])) {
+        $out['contract_demand_kva'] = (float) $data['contract_demand_kva'];
+    }
+
+    // Sanctioned load: resolve the raw value+unit deterministically (see
+    // resolve_sanctioned_load_kw()). A legacy-shaped row/replay with just a
+    // flat sanctioned_load_kw and neither new raw field bypasses resolution
+    // entirely, preserving pre-existing behavior for that value.
+    $rawSanctionedValue = isset($data['sanctioned_load_value']) && is_numeric($data['sanctioned_load_value']) ? (float) $data['sanctioned_load_value'] : null;
+    $rawSanctionedUnit = isset($data['sanctioned_load_unit']) && is_string($data['sanctioned_load_unit']) ? $data['sanctioned_load_unit'] : null;
+    if ($rawSanctionedValue !== null) {
+        $resolved = resolve_sanctioned_load_kw($rawSanctionedValue, $rawSanctionedUnit);
+        $out['sanctioned_load_kw'] = $resolved['value'];
+        $out['sanctioned_load_note'] = $resolved['note'];
+        $out['sanctioned_load_needs_review'] = $resolved['needs_review'];
+    } elseif (isset($data['sanctioned_load_kw']) && is_numeric($data['sanctioned_load_kw'])) {
+        $out['sanctioned_load_kw'] = (float) $data['sanctioned_load_kw'];
     }
 
     $cIn = isset($data['commercial']) && is_array($data['commercial']) ? $data['commercial'] : array();
@@ -851,7 +1112,8 @@ function vision_output_schema() {
             'tariff_category' => array('type' => array('string', 'null')),
             'tariff_code' => array('type' => array('string', 'null')),
             'contract_demand_kva' => array('type' => array('number', 'null')),
-            'sanctioned_load_kw' => array('type' => array('number', 'null')),
+            'sanctioned_load_value' => array('type' => array('number', 'null')),
+            'sanctioned_load_unit' => array('type' => array('string', 'null')),
             'current_month' => array(
                 'type' => 'object',
                 'properties' => array(
@@ -859,7 +1121,9 @@ function vision_output_schema() {
                     'energy_rate' => array('type' => array('number', 'null')),
                     'wheeling_per_unit' => array('type' => array('number', 'null')),
                     'fac' => array('type' => array('number', 'null')),
-                    'electricity_duty' => array('type' => array('number', 'null')),
+                    'duty_total_amount' => array('type' => array('number', 'null')),
+                    'duty_rate_pct' => array('type' => array('number', 'null')),
+                    'duty_per_unit' => array('type' => array('number', 'null')),
                     'tax_on_sale' => array('type' => array('number', 'null')),
                     'tod' => array(
                         'type' => 'object',
@@ -873,7 +1137,10 @@ function vision_output_schema() {
                         'additionalProperties' => false,
                     ),
                 ),
-                'required' => array('total_units', 'energy_rate', 'wheeling_per_unit', 'fac', 'electricity_duty', 'tax_on_sale', 'tod'),
+                'required' => array(
+                    'total_units', 'energy_rate', 'wheeling_per_unit', 'fac',
+                    'duty_total_amount', 'duty_rate_pct', 'duty_per_unit', 'tax_on_sale', 'tod',
+                ),
                 'additionalProperties' => false,
             ),
             'billing_history_units' => array('type' => 'array', 'items' => array('type' => 'number')),
@@ -881,7 +1148,7 @@ function vision_output_schema() {
         ),
         'required' => array(
             'consumer_number', 'consumer_name', 'tariff_category', 'tariff_code',
-            'contract_demand_kva', 'sanctioned_load_kw', 'current_month',
+            'contract_demand_kva', 'sanctioned_load_value', 'sanctioned_load_unit', 'current_month',
             'billing_history_units', 'low_confidence_fields',
         ),
         'additionalProperties' => false,
@@ -905,13 +1172,16 @@ Return ONLY a single JSON object, no prose, no markdown fences, exactly this sha
   "tariff_category": "Industrial"|"Commercial"|null,
   "tariff_code": string|null,
   "contract_demand_kva": number|null,
-  "sanctioned_load_kw": number|null,
+  "sanctioned_load_value": number|null,
+  "sanctioned_load_unit": "kW"|"HP"|"kVA"|null,
   "current_month": {
     "total_units": number|null,
     "energy_rate": number|null,
     "wheeling_per_unit": number|null,
     "fac": number|null,
-    "electricity_duty": number|null,
+    "duty_total_amount": number|null,
+    "duty_rate_pct": number|null,
+    "duty_per_unit": number|null,
     "tax_on_sale": number|null,
     "tod": {
       "t00_06": {"units": number|null, "rate": number|null},
@@ -925,12 +1195,12 @@ Return ONLY a single JSON object, no prose, no markdown fences, exactly this sha
 }
 
 Rules:
-- All rate fields (energy_rate, wheeling_per_unit, fac, electricity_duty,
+- All rate fields (energy_rate, wheeling_per_unit, fac, duty_per_unit,
   tax_on_sale, and every tod rate) MUST be in RUPEES PER UNIT. MSEDCL prints some
   of these in "Ps/U" (paise per unit). If a value is labelled Ps/U or paise,
   DIVIDE BY 100. Example: "Tax on Sale @ 28.94 Ps/U" -> 0.2894. "FAC @ 20 Ps/U"
-  -> 0.20. Sanity: energy_rate is normally 5–10; fac/duty/tax/wheeling-per-unit
-  are normally well below 1.
+  -> 0.20. Sanity: energy_rate is normally 5–10; fac/tax/wheeling-per-unit/
+  duty_per_unit are normally well below 1.
 - energy_rate is the base energy charge rate for the current month's units (the
   "Energy Charges" rate, or the industrial/commercial consumption rate).
 - wheeling_per_unit: read the RATE from the bill's "Wheeling Charges" line —
@@ -941,16 +1211,35 @@ Rules:
   Charges is a different, fixed monthly charge (based on billed kVA, not
   units) and must be ignored entirely; it is never used anywhere in this
   extraction.
-- electricity_duty: some industrial bills are duty-exempt and print the duty
-  rate or amount as "0.00", "0", or "Exempt". In that case return 0 (a
-  confirmed, confident value) — do NOT return null and do NOT add
-  "current_month.electricity_duty" to low_confidence_fields for a clearly
-  printed zero/exempt. Only use null (and flag it) if the duty line truly
-  cannot be read at all.
+- duty_total_amount / duty_rate_pct / duty_per_unit: MSEDCL industrial bills
+  typically show duty in TWO places — a rate table with a line like "E.D. on
+  (Rs.) / Rate %" (e.g. 7.50), and a billing-details line labelled
+  "Electricity Duty" showing the monthly TOTAL AMOUNT (e.g. 4178.77). COPY
+  THESE THREE NUMBERS EXACTLY AS PRINTED — do NOT convert or divide ANY of
+  them yourself:
+    - duty_total_amount: the billing-details "Electricity Duty" TOTAL amount
+      for the month, verbatim (e.g. 4178.77).
+    - duty_rate_pct: the rate-table "E.D. on (Rs.) / Rate %" PERCENTAGE,
+      verbatim (e.g. 7.50, not 0.075).
+    - duty_per_unit: ONLY if the bill separately, literally prints a
+      per-unit duty RATE in Rs/unit somewhere (rare) — otherwise null.
+  All server-side math (dividing the total by units, etc.) happens after
+  extraction — your job is to copy the printed numbers, not compute
+  anything. If the bill is duty-exempt (prints "0.00" or "Exempt" for the
+  rate/amount), return duty_rate_pct or duty_total_amount as 0, and do NOT
+  add any duty field to low_confidence_fields for a clearly printed
+  zero/exempt. Only use null (and flag it) if nothing about duty can be
+  read at all.
 - The four TOD (Time of Day) slots are 00:00–06:00, 06:00–09:00, 09:00–17:00,
   17:00–24:00. Each has its own units and its own rate. RATES CAN BE NEGATIVE
   (the daytime 09:00–17:00 slot is usually a rebate, e.g. -1.149). Preserve the
   sign exactly.
+- sanctioned_load_value/sanctioned_load_unit: read the customer's
+  sanctioned/contracted load EXACTLY as printed — the number and its unit
+  separately, verbatim. Do NOT convert units yourself (e.g. do NOT turn
+  "90 HP" into a kW number) — copy the raw value and set the unit to
+  whichever of "kW"/"HP"/"kVA" is actually printed next to it. Do not
+  confuse this with contract_demand_kva (a related but different figure).
 - billing_history_units: the bill has a "Billing History" table listing months
   and their units. Return the UNITS values, MOST RECENT FIRST, up to 12 numbers.
   Strip commas.
@@ -976,14 +1265,44 @@ function sanitize_extraction($data) {
     if (isset($data['tariff_category']) && in_array($data['tariff_category'], array('Industrial', 'Commercial'), true)) {
         $out['tariff_category'] = $data['tariff_category'];
     }
-    foreach (array('contract_demand_kva', 'sanctioned_load_kw') as $k) {
-        if (isset($data[$k]) && is_numeric($data[$k])) $out[$k] = (float) $data[$k];
+    if (isset($data['contract_demand_kva']) && is_numeric($data['contract_demand_kva'])) {
+        $out['contract_demand_kva'] = (float) $data['contract_demand_kva'];
+    }
+
+    // Sanctioned load: resolve the raw value+unit deterministically (see
+    // resolve_sanctioned_load_kw()). A legacy-shaped row/replay with just a
+    // flat sanctioned_load_kw and neither new raw field bypasses resolution
+    // entirely, preserving pre-existing behavior for that value.
+    $rawSanctionedValue = isset($data['sanctioned_load_value']) && is_numeric($data['sanctioned_load_value']) ? (float) $data['sanctioned_load_value'] : null;
+    $rawSanctionedUnit = isset($data['sanctioned_load_unit']) && is_string($data['sanctioned_load_unit']) ? $data['sanctioned_load_unit'] : null;
+    if ($rawSanctionedValue !== null) {
+        $resolvedLoad = resolve_sanctioned_load_kw($rawSanctionedValue, $rawSanctionedUnit);
+        $out['sanctioned_load_kw'] = $resolvedLoad['value'];
+        $out['sanctioned_load_note'] = $resolvedLoad['note'];
+        $out['sanctioned_load_needs_review'] = $resolvedLoad['needs_review'];
+    } elseif (isset($data['sanctioned_load_kw']) && is_numeric($data['sanctioned_load_kw'])) {
+        $out['sanctioned_load_kw'] = (float) $data['sanctioned_load_kw'];
     }
 
     $cmIn = isset($data['current_month']) && is_array($data['current_month']) ? $data['current_month'] : array();
     $cm = &$out['current_month'];
-    foreach (array('total_units', 'energy_rate', 'wheeling_per_unit', 'fac', 'electricity_duty', 'tax_on_sale') as $k) {
+    foreach (array('total_units', 'energy_rate', 'wheeling_per_unit', 'fac', 'tax_on_sale') as $k) {
         if (isset($cmIn[$k]) && is_numeric($cmIn[$k])) $cm[$k] = (float) $cmIn[$k];
+    }
+
+    // Electricity duty: resolve the three raw signals deterministically
+    // (see resolve_electricity_duty()). A legacy-shaped row/replay with
+    // just a flat electricity_duty and none of the three new raw fields
+    // bypasses resolution entirely, preserving pre-existing behavior
+    // (including validate_extraction()'s existing out-of-range/paise-fix
+    // handling) for that value.
+    $rawDutyPerUnit = isset($cmIn['duty_per_unit']) && is_numeric($cmIn['duty_per_unit']) ? (float) $cmIn['duty_per_unit'] : null;
+    $rawDutyTotal = isset($cmIn['duty_total_amount']) && is_numeric($cmIn['duty_total_amount']) ? (float) $cmIn['duty_total_amount'] : null;
+    $rawDutyRatePct = isset($cmIn['duty_rate_pct']) && is_numeric($cmIn['duty_rate_pct']) ? (float) $cmIn['duty_rate_pct'] : null;
+    if ($rawDutyPerUnit !== null || $rawDutyTotal !== null || $rawDutyRatePct !== null) {
+        $cm['electricity_duty'] = resolve_electricity_duty($rawDutyPerUnit, $rawDutyTotal, $rawDutyRatePct, $cm['total_units']);
+    } elseif (isset($cmIn['electricity_duty']) && is_numeric($cmIn['electricity_duty'])) {
+        $cm['electricity_duty'] = (float) $cmIn['electricity_duty'];
     }
 
     $todIn = isset($cmIn['tod']) && is_array($cmIn['tod']) ? $cmIn['tod'] : array();
@@ -1118,7 +1437,7 @@ if ($category === 'Commercial') {
     try {
         $vision = call_commercial_vision_api($images);
     } catch (\Exception $e) {
-        respond_error("We couldn't read this bill (" . $e->getMessage() . "). Please fill in the values yourself below.");
+        fail_extraction_generic('commercial vision', $e->getMessage(), $correlationId);
     }
 
     $val = validate_commercial_extraction($vision['data'], $vision['model_flags']);
@@ -1127,6 +1446,7 @@ if ($category === 'Commercial') {
         'data' => $vision['data'],
         'needs_review' => $val['needs_review'],
         'suggested_corrections' => $val['suggested_corrections'],
+        'correction_reasons' => $val['correction_reasons'],
         'quality' => $val['quality'],
         'source' => 'vision',
     ));
@@ -1150,6 +1470,7 @@ if (isset($_FILES['bill_pdf']) && $_FILES['bill_pdf']['error'] === UPLOAD_ERR_OK
                     'data' => $textData,
                     'needs_review' => $val['needs_review'],
                     'suggested_corrections' => $val['suggested_corrections'],
+                    'correction_reasons' => $val['correction_reasons'],
                     'quality' => $val['quality'],
                     'source' => 'text',
                 ));
@@ -1164,7 +1485,7 @@ if (isset($_FILES['bill_pdf']) && $_FILES['bill_pdf']['error'] === UPLOAD_ERR_OK
 try {
     $vision = call_vision_api($images);
 } catch (\Exception $e) {
-    respond_error("We couldn't read this bill (" . $e->getMessage() . "). Please fill in the values yourself below.");
+    fail_extraction_generic('industrial vision', $e->getMessage(), $correlationId);
 }
 
 $val = validate_extraction($vision['data'], $vision['model_flags']);
@@ -1173,6 +1494,7 @@ respond(array(
     'data' => $vision['data'],
     'needs_review' => $val['needs_review'],
     'suggested_corrections' => $val['suggested_corrections'],
+    'correction_reasons' => $val['correction_reasons'],
     'quality' => $val['quality'],
     'source' => 'vision',
 ));

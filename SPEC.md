@@ -44,6 +44,7 @@ wiring" and "Admin page" below.
   "tariff_code": "string",
   "contract_demand_kva": 0,
   "sanctioned_load_kw": 0,
+  "sanctioned_load_note": "string|null",
   "current_month": {
     "total_units": 0,
     "energy_rate": 0,
@@ -91,14 +92,43 @@ Notes:
   found that was the wrong label for the same already-correctly-captured
   value — see "Extraction implementation notes" and Owner notes below.)
 - `current_month.fac`: Rs/unit, e.g. `0.20`.
-- `current_month.electricity_duty`: Rs/unit, e.g. `0` — duty-exempt bills
-  correctly return `0` here (a confirmed value, never flagged for review),
-  not `null`. Only a genuinely unreadable duty line is `null`.
+- `current_month.electricity_duty`: Rs/unit, e.g. `0` — a RESOLVED value,
+  computed deterministically in PHP (`resolve_electricity_duty()`) from
+  three raw signals the vision model copies verbatim off the bill
+  (`duty_total_amount`, `duty_rate_pct`, `duty_per_unit` — extraction-input
+  fields, not part of this canonical shape; see "Extraction implementation
+  notes"). Model-side arithmetic for this field was found to be
+  nondeterministic and is no longer trusted at all — on a real bill, one
+  vision run divided the printed 7.50% rate by 100 (0.075, landing INSIDE
+  the plausible band with no flag raised) instead of the correct
+  `duty_total_amount / total_units` (4178.77 / 4510 = 0.9266). Duty-exempt
+  bills correctly resolve to `0` (a confirmed value, never flagged for
+  review), not `null`. Only a genuinely unreadable duty resolves to `null`.
 - `current_month.tax_on_sale`: Rs/unit, e.g. `0.2894`.
 - `tod.t09_17.rate` can be negative — a daytime rebate, e.g. `-1.149`.
 - `tod.t17_24.rate` e.g. `1.915`.
+- `sanctioned_load_kw`: a RESOLVED value in kW, computed deterministically
+  in PHP (`resolve_sanctioned_load_kw()`) from two raw signals the vision
+  model copies verbatim (`sanctioned_load_value` + `sanctioned_load_unit`,
+  one of `"kW"`/`"HP"`/`"kVA"` — extraction-input fields, not part of this
+  canonical shape). HP converts via ×0.7355; kVA passes through as printed
+  but is flagged for review (no power factor is available to convert it
+  properly); kW passes through unchanged. Model-side conversion was found
+  nondeterministic on a real bill — the same "90 HP" line came back as raw
+  `90` in one vision run and as a converted `66.1949` in another.
+- `sanctioned_load_note`: a display-only hint for the confirm screen when a
+  conversion happened, e.g. `"90 HP on bill → 66.2 kW"` for HP, or a
+  cautionary note for kVA. `null` when the bill already printed kW, or
+  nothing was printed. Never collected back — the confirm screen still
+  only edits the single converted kW number.
 - `commercial.current_month_units`: e.g. `4000` — commercial's total-units
   equivalent; no ToD-slot units table.
+- `sanctioned_load_kw`/`sanctioned_load_note` are top-level, shared, and
+  resolved identically for commercial as for industrial (see above) —
+  `resolve_sanctioned_load_kw()` doesn't know or care which category it's
+  running for. This matters more for commercial, where sanctioned load
+  actively CAPS sizing (see "Commercial formulation" below) rather than
+  being purely informational.
 - `commercial.energy_rate`/`wheeling`/`fac`/`tax_on_sale`/`grid_support_charge`:
   all Rs/unit, e.g. `8.51`/`1.60`/`0.65`/`0.279`/`1.96`. Unlike industrial,
   `grid_support_charge` is READ OFF THE BILL for commercial, not a fixed
@@ -135,11 +165,42 @@ Notes:
   Do NOT read the bill's separate "Demand Charges" line for this (a
   different, fixed monthly charge based on billed kVA — always ignored,
   deliberately, since solar doesn't avoid it).
-- **`electricity_duty` exemption.** Some industrial bills are duty-exempt
-  and print the duty line as `0.00` or "Exempt" — return `0` (a confirmed
-  value) in that case, never `null`, and never flag it for review. Only a
-  bill where the duty line genuinely can't be read at all should produce
-  `null`.
+- **`electricity_duty` — copy verbatim, compute nothing.** MSEDCL industrial
+  bills print duty in TWO places: a rate table (e.g. "E.D. on (Rs.) /
+  Rate % 7.50") and a billing-details line with the monthly TOTAL amount
+  (e.g. `4178.77`). Model-side conversion between these was found to be
+  NONDETERMINISTIC and is no longer trusted at all — first a real bill's
+  total amount (`4178.77`) was mistaken for the per-unit value outright
+  (producing a ~₹4185/unit effective tariff and a garbage dashboard: ₹697 Cr
+  earnings, 5946x multiple, blank IRR); after that was fixed by asking the
+  model to divide the total by units itself, a LATER run on the SAME bill
+  instead divided the printed 7.50% rate by 100 (`0.075`) — a value that
+  happened to land inside the plausible 0-3 band, so no flag caught it
+  either. The vision schema now asks for three RAW fields instead —
+  `duty_total_amount`, `duty_rate_pct`, `duty_per_unit` — copied exactly as
+  printed, with an explicit "do NOT convert or divide" instruction for all
+  three. All arithmetic moved to deterministic PHP
+  (`resolve_electricity_duty()` in `api/extract.php`): try a printed
+  per-unit rate first, then `duty_total_amount / total_units`; a rate
+  percentage alone is deliberately NOT converted (it needs the bill's
+  assessable base amount, which varies bill to bill — too fragile to guess)
+  — flagged for manual entry instead.
+- **`electricity_duty` exemption.** Some industrial bills ARE duty-exempt
+  and print the duty line as `0.00` or "Exempt" — the resolved value is `0`
+  (a confirmed value) in that case, never `null`, and never flagged for
+  review. Only a bill where nothing about duty can be read at all resolves
+  to `null`. (One real bill charged 7.5% duty — exemption is common but
+  not universal; don't assume 0 by default.)
+- **`sanctioned_load_kw` — same "copy verbatim, compute nothing" fix.** The
+  same class of nondeterminism showed up in unit conversion: the same
+  bill's "90 HP" sanctioned-load line came back as raw `90` in one vision
+  run and as a converted `66.1949` in another — the model wasn't asked to
+  convert, sometimes did anyway, and did it inconsistently. Fixed the same
+  way: the vision schema asks for `sanctioned_load_value` +
+  `sanctioned_load_unit` (`"kW"`/`"HP"`/`"kVA"`, verbatim), and
+  `resolve_sanctioned_load_kw()` converts deterministically in PHP
+  (HP × 0.7355; kVA passed through as-is but flagged, since converting it
+  properly needs a power factor the bill doesn't print; kW unchanged).
 - **TOD slot rates can be negative** (daytime rebate). Preserve the sign —
   never take an absolute value.
 - **`billing_history_units`.** The MSEDCL bill has a "Billing History" table
@@ -227,18 +288,32 @@ it, per `extraction_hardening.md`.
    clean `{"success": false, "error": ...}`.
 3. **Validation** (`validate_extraction()`, used by BOTH paths): implements
    every rule in `extraction_hardening.md`'s "VALIDATION RULES" —
-   range checks (`energy_rate` 3–12, the four small rate fields 0–2/0–3, each
-   ToD rate -5–5, `total_units` 100–1,000,000, `contract_demand_kva` 1–5,000),
-   the paise-not-converted cross-check (any of `fac` / `tax_on_sale` /
-   `wheeling_per_unit` > 5 → flag it and offer the ÷100 value as
-   `suggested_corrections`), the ToD-units-reconcile cross-check
-   (±3% of `total_units`), billing-history plausibility (4–12 entries, each
-   within 3× the median), and the daytime-rate-sign check (`t09_17.rate`
-   positive & > 0.5 is flagged, never auto-changed). `electricity_duty` gets
-   its own rule instead of the generic paise check: a confirmed `0`
-   (duty-exempt bill) is never flagged, even if the model added it to
-   `low_confidence_fields` out of caution — only `null` or an out-of-range
-   value flags. A field is
+   range checks (`energy_rate` 3–12, `wheeling_per_unit` 0–3, `fac` 0–2,
+   `electricity_duty` 0–3, `tax_on_sale` 0–2, each ToD rate -5–5,
+   `total_units` 100–1,000,000, `contract_demand_kva` 1–5,000), the
+   ToD-units-reconcile cross-check (±3% of `total_units`), billing-history
+   plausibility (4–12 entries, each within 3× the median), and the
+   daytime-rate-sign check (`t09_17.rate` positive & > 0.5 is flagged, never
+   auto-changed). `electricity_duty` gets its own rule instead of the
+   generic paise check: a confirmed `0` (duty-exempt bill) is never
+   flagged, even if the model added it to `low_confidence_fields` out of
+   caution — only `null` or an out-of-range value flags.
+   **`suggested_corrections`/`correction_reasons`**: `wheeling_per_unit`,
+   `fac`, and `electricity_duty` each get `suggest_per_unit_correction()` —
+   when out of range, it tries value÷`total_units` first (a monthly TOTAL
+   amount mistaken for the per-unit rate — the real bug found on a real
+   bill: Electricity Duty's Rs 4178.77 total landing in the per-unit field,
+   producing a ~₹4185/unit tariff) and offers that if it lands back in
+   range; only if that doesn't fit does it fall back to the older ÷100
+   paise fix. `tax_on_sale` keeps the ÷100-only fix (no natural "total
+   amount" counterpart on the bill). The API response's new
+   `correction_reasons` field (dotted-path → `"amount_div_units"` or
+   `"paise_div_100"`) lets the confirm screen word the one-tap button
+   correctly ("Use 0.93? (amount ÷ units)" vs. the plain "Use X?" for a
+   paise fix) instead of a single generic label that would misdescribe an
+   amount÷units fix. Commercial's `validate_commercial_extraction()` gets
+   the same amount-vs-paise treatment for its own `wheeling`/`fac` (divided
+   by `commercial.current_month_units` instead). A field is
    `needs_review` if it's `null`, fails a check above, or the vision model
    itself listed it in `low_confidence_fields` (fuzzy-matched — the model
    isn't given a strict path grammar). Overall `quality` is `"poor"` when
@@ -403,6 +478,33 @@ conditions almost always mean a field is still blank after manual entry, or
 screen shows the thrown message verbatim: *"Your bill values look
 inconsistent, please recheck total units and TOD slots."* and does NOT
 render the dashboard.
+
+**Output sanity guard** (`assets/formulation.js`, both categories): even
+when every individual field passes its own range check, the field
+*values*, once combined, might not — the failure that motivated this
+guard had `electricity_duty` holding a monthly TOTAL (Rs 4178.77) instead
+of a per-unit rate, and every per-field check happened to still pass
+(nothing in `validate_extraction()` at the time caught it), producing an
+`effective_tariff` of ~₹4185/unit and a dashboard rendering ₹697 Cr
+earnings, a 5946x money multiple, and a blank IRR. Both `deriveIndustrial()`
+and `deriveCommercial()` now check the fully-computed `effective_tariff`
+against a plausibility band (`TARIFF_SANITY_LO`/`_HI` = 3–25 Rs/unit,
+exported off `RiteFormulation`) immediately after computing it, and throw a
+distinct `RiteFormulation.TariffSanityError` (not the generic
+`INCONSISTENT_MESSAGE`) if it's outside that band or non-finite. The error
+carries `.tariff` (the offending value) and `.fields` (the dotted-paths of
+every per-unit field that fed it — industrial:
+`energy_rate`/`wheeling_per_unit`/`fac`/`electricity_duty`/`tax_on_sale`/
+`tod.t09_17.rate`; commercial: `energy_rate`/`wheeling`/`fac`/
+`electricity_duty_pct`/`tax_on_sale`/`tod_rebate_pct`/`grid_support_charge`).
+`app.js`'s `confirmBtn` handler catches this specifically (via
+`instanceof`) and, beyond showing the message, re-renders the rate section
+with every listed field marked `needs_review` (the amber "please check"
+highlight) using the customer's own just-submitted values — so the
+customer sees exactly which inputs to recheck, not just a dead end. This
+is deliberately a blanket check independent of *why* the tariff went
+wrong — cheap insurance against any future extraction mistake, not a
+duty-specific patch.
 
 ## Commercial formulation (implemented in `assets/formulation.js`)
 
@@ -1677,3 +1779,197 @@ success" report ever comes up for either of them.
     explanatory comments belongs to either commercial's own (already-fixed)
     `wheeling` field or is industrial's `wheeling_per_unit` in its new,
     correct place.
+- **Duty total-vs-per-unit bug + tariff sanity guard (most recent task)**:
+  found on a REAL industrial bill (Shriram Stone Crusher) — the vision
+  model put the monthly TOTAL electricity duty amount (Rs 4178.77) into the
+  per-unit `electricity_duty` field (correct per-unit value: 4178.77/4510
+  units ≈ 0.9266). Effective tariff came out ~₹4185/unit; the dashboard
+  rendered ₹697 Cr earnings, a 5946x multiple, and a blank IRR. The same
+  bill also disproved the "industrial duty is usually 0/exempt" assumption
+  behind the earlier duty-exemption fix — this one charges 7.5%. Three
+  layers, per the task:
+  1. **Vision prompt**: explicitly describes both places MSEDCL industrial
+     bills print duty (a rate-table % and a billing-details total amount),
+     instructs the model to always return the per-unit rate — computing
+     `total_amount / total_units_this_month` itself if only the total is
+     printed — and keeps the existing "genuinely exempt -> return 0" rule.
+     Mirrored into `extraction_hardening.md` (kept in sync with the code
+     since `extract.php`'s comments call it the prompt's source of truth).
+  2. **Validation**: `electricity_duty`'s plausibility band widened 0-2 ->
+     0-3 (a real 7.5%-duty bill's genuine ~0.93 sat close to the old
+     ceiling). New shared helper `suggest_per_unit_correction()` in
+     `api/extract.php` tries value÷`total_units` first (catches exactly
+     this bug — 4178.77÷4510 lands back in range) before falling back to
+     the older ÷100 paise fix; applied to `wheeling_per_unit`/`fac`/
+     `electricity_duty` (industrial) and `wheeling`/`fac` (commercial, ÷
+     `commercial.current_month_units`) — anywhere a monthly-total-instead-
+     of-per-unit mixup is plausible. `tax_on_sale`/`grid_support_charge`
+     keep the simple ÷100-only fix (no natural "total amount" counterpart
+     on the bill). New response field `correction_reasons` (dotted-path ->
+     `"amount_div_units"`|`"paise_div_100"`) lets `app.js`'s one-tap button
+     say "Use 0.93? (amount ÷ units)" instead of a generic "Use X?" that
+     would misdescribe what tapping it does — threaded through
+     `renderConfirmForm()` -> `renderRateSection()` ->
+     `buildRateFields()`/`buildCommercialRateFields()` -> `makeFieldDiv()`
+     as a new trailing parameter everywhere, defaulting to `{}`/`undefined`
+     so nothing breaks where it isn't passed.
+  3. **Output sanity guard**: new `RiteFormulation.TariffSanityError` (see
+     "Output sanity guard" under "Formulas" above) — both `deriveIndustrial()`
+     and `deriveCommercial()` throw it if the fully-computed
+     `effective_tariff` falls outside 3-25 Rs/unit, and `app.js`'s
+     `confirmBtn` handler catches it specifically to re-flag every per-unit
+     field that fed the tariff (not just show the message) using an
+     `instanceof` check against the new exported error class.
+  - **Verification**: re-ran both existing reference examples through the
+     real `RiteFormulation.derive()` dispatcher — industrial `6.5604` and
+     commercial `10.0621`, both bit-identical, confirming zero regression.
+     Added a new case with this bug's exact numbers (units 4510, energy
+     7.66, wheeling 1.52, FAC 0.30, duty amount 4178.77): confirmed
+     `derive()` now THROWS `TariffSanityError` on the buggy raw input
+     (tariff ≈4186.29), confirmed `suggest_per_unit_correction(4178.77,
+     4510, 0, 3)` returns exactly `{value: 0.9266, reason:
+     "amount_div_units"}` (checked in both a Node harness against the real
+     `formulation.js` and a standalone PHP harness against the real
+     `extract.php`'s function definitions), and computed the resulting
+     effective tariff with the corrected duty: **7.66 + 1.52 + 0.30 +
+     0.9266 + 0 − 1.96 + 0 = 8.4466 Rs/unit** — sane, within the 3-25 band.
+     (`tax_on_sale` and the daytime ToD rate were not given for this bill;
+     assumed 0 purely to demonstrate the guard/fix in isolation — not a
+     real value for this customer.) Neither harness is committed to the
+     repo (session scratchpad only, per this task's established pattern).
+     Not tested against a real bill upload end-to-end in a browser — same
+     standing caveat as every prior extraction-logic change in this file.
+- **Move model-side arithmetic to deterministic PHP (most recent task)**:
+  two reliability fixes found on the same real bill (Shriram Stone
+  Crusher), both following the same root-cause pattern — asking the vision
+  model to do UNIT CONVERSION OR ARITHMETIC on a bill value is
+  nondeterministic, even with explicit instructions, and a wrong result
+  can land inside the plausible range with no flag raised. Both fixes stop
+  asking the model to compute anything; it now only copies raw, verbatim
+  values, and ALL arithmetic moved to deterministic PHP functions.
+  1. **Duty**: previously asked the model to return a single per-unit
+     `electricity_duty`, computing `total/units` itself if needed (the
+     immediately preceding task's fix, still model-side arithmetic). On
+     this bill it instead divided the printed 7.50% rate by 100 -> `0.075`
+     — inside the 0-3 plausible band, so nothing flagged it; the correct
+     value was `4178.77 / 4510 = 0.9266`. Now the schema asks for THREE raw
+     fields (`duty_total_amount`, `duty_rate_pct`, `duty_per_unit`) with an
+     explicit "copy exactly, do not convert or divide" instruction, and
+     `resolve_electricity_duty()` in `api/extract.php` derives the final
+     per-unit value in a fixed priority order: printed per-unit rate (if
+     plausible) -> total÷units -> (rate% deliberately skipped, too fragile
+     without the bill's assessable base) -> `0` if nothing printed/exempt.
+     The confirm screen still shows only the single derived value
+     (`current_month.electricity_duty`), unchanged contract — the three raw
+     fields never reach it.
+  2. **Sanctioned load**: the model sometimes converted "90 HP" to kW
+     itself and sometimes didn't, inconsistently across runs of the SAME
+     bill (raw `90` once, `66.1949` once). The schema now asks for
+     `sanctioned_load_value` + `sanctioned_load_unit` (verbatim, one of
+     `"kW"`/`"HP"`/`"kVA"`), and `resolve_sanctioned_load_kw()` converts
+     deterministically: HP × 0.7355 -> kW; kVA passed through as-is but
+     flagged for review (properly converting kVA needs a power factor the
+     bill doesn't print — passing it through unconverted but visibly
+     flagged beats silently mistreating it as kW); kW unchanged. Unlike
+     duty, this ALSO surfaces a new display-only field,
+     `sanctioned_load_note` (e.g. `"90 HP on bill → 66.2 kW"`), since the
+     task wanted the conversion to be visible on the confirm screen, not
+     just silently applied — threaded through `blank_extraction()` ->
+     `sanitize_extraction()`/`sanitize_commercial_extraction()` -> the API
+     response -> `app.js`'s `buildCustomerFields()` -> a new plain
+     informational `hint` parameter on `makeFieldDiv()` (distinct from the
+     amber "please check" `reviewme` mechanism — this hint shows
+     regardless of review state, since a correct deterministic conversion
+     isn't something to fix). This matters most for commercial, where
+     sanctioned load actively CAPS system sizing (see "Commercial
+     formulation") rather than being purely informational.
+  - **Legacy fallback (both fixes, same pattern)**: `sanitize_extraction()`/
+    `sanitize_commercial_extraction()` check whether any of the NEW raw
+    fields are present; if none are (an old-shaped row/replay with just a
+    flat `electricity_duty` or `sanctioned_load_kw` and nothing else), that
+    flat value passes through completely UNCHANGED — bypassing the new
+    resolve functions entirely rather than feeding a bare number through
+    logic that expects three duty signals or a value+unit pair. This
+    preserves whatever behavior that value had before this task (including
+    `validate_extraction()`'s existing out-of-range/paise-fix handling for
+    a legacy duty value) rather than inventing new semantics for a shape
+    the new resolve functions weren't designed for. As with the prior
+    wheeling/demand_charge task, no live code path in this codebase
+    actually re-feeds an archived `submissions.extracted` row back into
+    these functions today (the admin Leads view never selects that
+    column) — this is precautionary, not a fix for an active bug.
+  - **Free text-layer fast path updated too**: `parse_bill_text()` now
+    extracts the same duty signals (via a new best-effort regex for
+    `duty_total_amount`/`duty_rate_pct` — no distinct "per-unit duty" label
+    pattern exists in free text) and a value+unit pair for sanctioned load
+    (new `find_number_and_unit()` helper, capturing an optional
+    kW/HP/kVA suffix after the number), both resolved through the same two
+    functions the vision path uses. Kept in sync deliberately rather than
+    left on the old single-regex approach, which would otherwise have
+    become the WORSE-behaved path once vision was hardened. Entirely
+    best-effort/unverified against a real bill's text layer — same
+    standing caveat this fast path has carried since it was first written.
+  - **Verified**: `resolve_electricity_duty(null, 4178.77, 7.5, 4510)` =
+    `0.9266` (this task's exact numbers) and `resolve_sanctioned_load_kw(90,
+    "HP")` = `{value: 66.195, needs_review: false}` (also exact), both in a
+    standalone PHP harness (can't `require()` `api/extract.php` directly —
+    its top-level code dispatches a real HTTP request and `exit()`s — so
+    the two functions are redefined verbatim in the harness and grep-
+    checked against the real file to catch drift). Also verified: the
+    OLD naive `7.50/100 = 0.075` sits inside the 0-3 band (confirming it
+    really would have passed silently, explaining why no prior flag caught
+    it); a kVA case passes through as-is AND is flagged; both legacy-
+    fallback branches (flat `electricity_duty`, flat `sanctioned_load_kw`)
+    pass their old values through unchanged. Re-ran the industrial
+    (`6.5604`) and commercial (`10.0621`) reference examples through
+    `RiteFormulation.derive()` — both still bit-identical, confirming this
+    task never touched `formulation.js` (it doesn't need to: both fixes
+    live entirely in `api/extract.php`'s extraction layer, upstream of
+    where formulation.js reads the already-resolved `electricity_duty`/
+    `sanctioned_load_kw` keys it always read). Neither harness is committed
+    to the repo (session scratchpad only). Not tested against a real bill
+    upload end-to-end, and the confirm screen's new sanctioned-load hint
+    was never viewed in an actual browser — same standing caveat as every
+    other extraction-logic change in this file.
+- **Stop leaking provider/internal error text to customers (most recent
+  task)**: a real vision-API failure (Anthropic account out of credits)
+  showed the customer the raw provider message verbatim — "We couldn't
+  read this bill (vision service error: Your credit balance is too low to
+  access the Anthropic API. Please go to Plans & Billing to upgrade or
+  purchase credits.)." Every error path in `api/extract.php` (both vision
+  dispatch catch blocks, the top-level uncaught-exception handler, the
+  fatal-error shutdown handler) now funnels through
+  `fail_extraction_generic()`, which `error_log()`s the FULL raw detail
+  server-side and responds with exactly one fixed client-facing string
+  (`GENERIC_EXTRACTION_ERROR`) — no provider names, no upstream error text,
+  no HTTP codes, ever. A credit/quota/rate-limit error is additionally
+  detected by keyword match (`is_quota_or_credit_error()`) and logged at a
+  distinct `[EXTRACT_QUOTA]` prefix instead of the routine `[EXTRACT_FAIL]`
+  one — greppable as an ops emergency (extraction down for every customer,
+  not just one bad image) separate from routine per-bill failures.
+  `app.js` mirrors the same fixed string client-side and no longer reads
+  `json.error` for display AT ALL (belt and braces — even if a future bug
+  reintroduced server-side leaking, the client still wouldn't render it).
+  - **No real submission id available for log correlation**: the task
+    asked for the submission id alongside each logged failure, but
+    `api/lead.php`'s Supabase insert (which creates that id) fires in
+    PARALLEL with the extraction request from `app.js`, deliberately, so
+    extraction is never blocked waiting on it — no real id exists yet at
+    the point `api/extract.php` runs. Used the mobile number posted
+    alongside the bill instead (already sent in the same request) as the
+    best available correlation identifier; flagging this substitution
+    explicitly rather than silently redefining what "submission id" meant.
+  - **Verified**: the exact reported Anthropic credit-balance message
+    produces the fixed generic client string (confirmed it contains no
+    "anthropic", no "credit balance", no HTTP-code-shaped substring) while
+    the server log — redirected to a temp file in the test harness via
+    `ini_set('error_log', ...)` and read back, not just trusted — contains
+    the full raw provider text, the `[EXTRACT_QUOTA]` prefix, and the
+    mobile-number correlation id; a routine timeout-shaped message instead
+    gets `[EXTRACT_FAIL]`; a 429/`rate_limit_error`-shaped message is also
+    classified as quota. Standalone PHP harness (can't `require()`
+    `api/extract.php` directly — its top-level code dispatches a real HTTP
+    request and `exit()`s), functions redefined verbatim and grep-checked
+    against the real file to catch drift, per this file's established
+    pattern for this class of test. Not tested against a real Anthropic
+    account actually out of credits, or clicked through in a browser.
