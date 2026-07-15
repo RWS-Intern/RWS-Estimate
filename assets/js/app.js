@@ -612,6 +612,13 @@
           inputEl.value = suggestion;
           wrap.classList.remove("reviewme");
           note.style.display = "none";
+          // Accepting a suggestion is as deliberate as typing the value in
+          // by hand — mark it a manual override (see markUserEdited()) so a
+          // later total_units recompute never silently clobbers it, then
+          // dispatch "input" so total_units's own suggestion (the TOD-slot-
+          // sum reconcile) still triggers a live rate recompute.
+          inputEl.dataset.userEdited = "true";
+          inputEl.dispatchEvent(new Event("input", { bubbles: true }));
         });
         note.appendChild(btn);
       }
@@ -670,11 +677,78 @@
     stableNullFirstSort(items).forEach(function (it) { container.appendChild(it.el); });
   }
 
+  /** Raw charge totals (+ duty_rate_pct) for the currently-rendered
+   *  industrial confirm form, echoed back by api/extract.php purely so
+   *  recomputeDerivedRates() below can re-derive energy_rate/
+   *  wheeling_per_unit/fac/electricity_duty client-side whenever
+   *  total_units changes — mirrors sanitize_extraction()'s server formulas
+   *  exactly. Reset on every buildRateFields() call (fresh bill / category
+   *  switch), so it never leaks between renders. */
+  var industrialRateTotals = null;
+
+  var DERIVED_RATE_FIELD_IDS = ["c-energy_rate", "c-wheeling_per_unit", "c-fac", "c-electricity_duty"];
+
+  /** Briefly highlights fields recomputeDerivedRates() just changed, so the
+   *  customer notices a units edit rippled through the rates — not a
+   *  silent, easy-to-miss update. */
+  function flashUpdated(el) {
+    var wrap = el.closest(".field");
+    if (!wrap) return;
+    wrap.classList.add("just-updated");
+    setTimeout(function () { wrap.classList.remove("just-updated"); }, 1500);
+  }
+
+  function round4(n) { return Math.round(n * 10000) / 10000; }
+
+  /** Recomputes energy_rate/wheeling_per_unit/fac/electricity_duty from the
+   *  raw charge totals + the CURRENT total_units box, exactly mirroring
+   *  api/extract.php's sanitize_extraction()/resolve_electricity_duty_
+   *  workbook() formulas (per_unit = total/units; duty = duty_rate_pct/100
+   *  x (energy_total+wheeling_total+fac_total+tod_ec_total)/units). Skips
+   *  any field the customer has manually overridden (typed into directly,
+   *  or accepted a one-tap suggestion for) — dataset.userEdited === "true"
+   *  — so a later total_units edit never clobbers a deliberate manual
+   *  value. Called on every total_units "input" event (typing, or a
+   *  dispatched event from its own suggestion button). */
+  function recomputeDerivedRates() {
+    if (!industrialRateTotals) return;
+    var totalUnits = numOrNull("c-total_units");
+    if (totalUnits === null || totalUnits <= 0) return;
+    var t = industrialRateTotals;
+
+    function apply(id, value) {
+      if (value === null || value === undefined || isNaN(value)) return;
+      var el = document.getElementById(id);
+      if (!el || el.dataset.userEdited === "true") return;
+      var rounded = round4(value);
+      if (parseFloat(el.value) !== rounded) {
+        el.value = rounded;
+        flashUpdated(el);
+      }
+    }
+
+    if (t.energy_total_amount != null) apply("c-energy_rate", t.energy_total_amount / totalUnits);
+    if (t.wheeling_total_amount != null) apply("c-wheeling_per_unit", t.wheeling_total_amount / totalUnits);
+    if (t.fac_total_amount != null) apply("c-fac", t.fac_total_amount / totalUnits);
+    if (t.duty_rate_pct != null && t.energy_total_amount != null && t.wheeling_total_amount != null &&
+        t.fac_total_amount != null && t.tod_ec_total != null) {
+      var dutySum = t.energy_total_amount + t.wheeling_total_amount + t.fac_total_amount + t.tod_ec_total;
+      apply("c-electricity_duty", (t.duty_rate_pct / 100) * (dutySum / totalUnits));
+    }
+  }
+
   function buildRateFields(data, nr, sugg, reasons) {
     reasons = reasons || {};
     var container = document.getElementById("rateFieldsGrid");
     container.innerHTML = "";
     var cm = data.current_month || {};
+    industrialRateTotals = {
+      energy_total_amount: cm.energy_total_amount,
+      wheeling_total_amount: cm.wheeling_total_amount,
+      fac_total_amount: cm.fac_total_amount,
+      tod_ec_total: cm.tod_ec_total,
+      duty_rate_pct: cm.duty_rate_pct
+    };
     var specs = [
       { path: "current_month.total_units", label: "Total units this month", value: cm.total_units },
       { path: "current_month.energy_rate", label: "Energy rate (Rs/unit)", value: cm.energy_rate },
@@ -701,6 +775,18 @@
       return { el: el, isNull: isNullish(spec.value) };
     });
     stableNullFirstSort(items).forEach(function (it) { container.appendChild(it.el); });
+
+    // total_units drives a live recompute (typing, or a dispatched "input"
+    // from its own "Use N?" TOD-slot-sum reconcile button — see
+    // makeFieldDiv()). The four derived fields instead mark themselves as a
+    // manual override on real user input, so recomputeDerivedRates() knows
+    // to leave them alone from then on.
+    var totalUnitsEl = document.getElementById("c-total_units");
+    if (totalUnitsEl) totalUnitsEl.addEventListener("input", recomputeDerivedRates);
+    DERIVED_RATE_FIELD_IDS.forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.addEventListener("input", function () { el.dataset.userEdited = "true"; });
+    });
   }
 
   /** Commercial equivalent of buildRateFields() — wheeling/duty%/ToD-rebate%/

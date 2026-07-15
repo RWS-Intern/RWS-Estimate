@@ -196,6 +196,12 @@ body{font-family:Arial,Helvetica,sans-serif;color:var(--rs-text);background:var(
 .tod-table tr.reviewme input{border-color:var(--rs-gold)}
 .history-item.reviewme input{border-color:var(--rs-gold);background:#fff9e8}
 
+/* Brief highlight on a derived rate field (energy_rate/wheeling_per_unit/
+   fac/electricity_duty) right after recomputeDerivedRates() (assets/js/
+   app.js) rewrites it in response to a total_units edit — transparency
+   that a units correction rippled through the rates, not a silent update. */
+.field.just-updated input{border-color:var(--rs-blue);background:#e8f7ff;transition:background .4s,border-color .4s}
+
 /* ===== dashboard (financial engine), ported from reference/estimate.html ===== */
 .locked{background:var(--rs-gray);border:1px solid #e2e9ed;border-radius:8px;padding:12px;margin-bottom:8px}
 .locked .lh{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--rs-muted);font-weight:bold;margin-bottom:10px}

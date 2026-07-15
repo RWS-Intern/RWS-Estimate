@@ -52,6 +52,11 @@ wiring" and "Admin page" below.
     "fac": 0,
     "electricity_duty": 0,
     "duty_total_amount": 0,
+    "energy_total_amount": 0,
+    "wheeling_total_amount": 0,
+    "fac_total_amount": 0,
+    "tod_ec_total": 0,
+    "duty_rate_pct": 0,
     "tax_on_sale": 0,
     "tod": {
       "t00_06": { "units": 0, "rate": 0 },
@@ -82,7 +87,20 @@ Notes:
   keys are always present so downstream code never has to special-case a
   missing key, only null values within whichever one is live.
 - `tariff_code`: e.g. `"LT-V B II"`.
-- `current_month.total_units`: e.g. `5703`.
+- `current_month.total_units`: e.g. `4520`. Read from the BILLING DETAILS /
+  Consumption block's row for the customer's OWN tariff category (e.g. a
+  row literally labelled "Industrial", listing that row's Units, Rate, and
+  Energy Charge together — units × rate should reconcile with the printed
+  Energy Charge). **Never** the meter's current-minus-previous reading
+  difference, and **never** the four ToD slots' unit sum (a secondary
+  cross-check only, offered as a one-tap "Use N?" fix when it disagrees
+  with `total_units` by >3%, but not itself the primary reading) — a real
+  bill (Shivani Stone Crushers) had the model read the meter delta (2477)
+  instead of the billed figure (4520), which silently inflated every
+  per-unit rate derived from it (`wheeling_per_unit` 2.77 instead of 1.52,
+  `fac` 0.55 instead of 0.30) since every one of them divides by
+  `total_units`. See "Extraction implementation notes" and Owner notes
+  below.
 - `current_month.energy_rate`/`wheeling_per_unit`/`fac`: all Rs/unit (e.g.
   `7.66`/`1.52`/`0.30`), and all THREE are now RESOLVED values, computed
   deterministically in PHP (`sanitize_extraction()`'s
@@ -90,19 +108,28 @@ Notes:
   for that charge by `total_units` — matching Rite Water's official Solar
   Working Sheet, which does the same division rather than trusting a
   printed rate. The vision model is asked for `energy_total_amount`/
-  `wheeling_total_amount`/`fac_total_amount` (extraction-input fields, not
-  part of this canonical shape — see "Extraction implementation notes"),
-  never a rate directly, for exactly the reason `electricity_duty` below
-  moved off model-side arithmetic: it's deterministic and can't drift
-  between runs. `wheeling_total_amount` — do NOT confuse with the bill's
-  separate "Demand Charges" line (a different, fixed monthly charge based
-  on billed kVA) — that is never read, on purpose (solar doesn't avoid
-  it). (`wheeling_per_unit` was named `demand_charge_per_unit` until
-  real-bill testing found that was the wrong label for the same
-  already-correctly-captured value, and was itself a directly-read rate
-  until the Solar Working Sheet alignment task moved it to this
-  total-based derivation — see "Extraction implementation notes" and
-  Owner notes below.)
+  `wheeling_total_amount`/`fac_total_amount` (see below), never a rate
+  directly, for exactly the reason `electricity_duty` below moved off
+  model-side arithmetic: it's deterministic and can't drift between runs.
+  `wheeling_total_amount` — do NOT confuse with the bill's separate "Demand
+  Charges" line (a different, fixed monthly charge based on billed kVA) —
+  that is never read, on purpose (solar doesn't avoid it). (`wheeling_per_unit`
+  was named `demand_charge_per_unit` until real-bill testing found that was
+  the wrong label for the same already-correctly-captured value, and was
+  itself a directly-read rate until the Solar Working Sheet alignment task
+  moved it to this total-based derivation — see "Extraction implementation
+  notes" and Owner notes below.)
+- `current_month.energy_total_amount`/`wheeling_total_amount`/
+  `fac_total_amount`/`tod_ec_total`/`duty_rate_pct`: the raw monthly-total
+  (or, for `duty_rate_pct`, percentage) inputs `sanitize_extraction()`
+  divided by `total_units` to get `energy_rate`/`wheeling_per_unit`/`fac`/
+  `electricity_duty` above. Echoed back into this SAME canonical shape
+  (added by the recompute-on-edit fix, alongside `duty_total_amount`) purely
+  so `assets/js/app.js`'s confirm screen can re-derive those four per-unit
+  values CLIENT-SIDE, live, whenever the customer edits `total_units` after
+  the fact (accepting the ToD-sum reconcile suggestion, or typing a
+  correction by hand) — see "Extraction implementation notes" below. Not
+  themselves editable/validated confirm-screen fields.
 - `current_month.electricity_duty`: Rs/unit, e.g. `0.71` — a RESOLVED
   value. PRIMARY path (`resolve_electricity_duty_workbook()`): Rite
   Water's official Solar Working Sheet's exact formula, `duty_rate_pct/100
@@ -179,6 +206,25 @@ Notes:
   four small-rate fields comes out > 5, it was almost certainly left in
   paise — divide by 100. The confirm screen is the backstop for anything this
   heuristic gets wrong.
+- **`total_units` — the BILLING DETAILS consumption row, never the meter
+  delta, never the ToD-slot sum.** Since every per-unit charge
+  (`energy_rate`/`wheeling_per_unit`/`fac`/`electricity_duty`) is computed
+  as `charge_total / total_units`, a wrong `total_units` silently inflates
+  or deflates ALL of them at once, even though each one individually still
+  looks like a plausible number. A real bill (Shivani Stone Crushers) had
+  the model read the meter's current-minus-previous reading difference
+  (`2477`) instead of the BILLING DETAILS "Industrial" row's billed/assessed
+  units (`4520`) — the bill's Multiplying Factor was 1.00 (assessed/KVAH
+  billing, not a CT/PT-multiplied meter), so the two numbers looked equally
+  plausible with nothing to flag the mismatch, and every derived rate came
+  out wrong (`wheeling_per_unit` `2.77` instead of `1.52`, `fac` `0.55`
+  instead of `0.30`). The vision prompt now explicitly names the correct
+  source (the tariff-category consumption row, self-checkable via units ×
+  rate = that row's printed Energy Charge) and explicitly forbids the meter
+  delta. The four ToD slot units' sum is a related but DIFFERENT number
+  (can legitimately differ slightly, e.g. `4562` vs. the billed `4520`) —
+  it stays a secondary cross-check (the existing ±3%-mismatch "Use N?"
+  reconcile suggestion), never the primary reading.
 - **`energy_total_amount`/`wheeling_total_amount`/`fac_total_amount` — copy
   the TOTAL, never a rate.** Rite Water's official Solar Working Sheet
   computes every one of these per-unit charges as `charge_total /
@@ -220,6 +266,35 @@ Notes:
   review. Only a bill where nothing about duty can be read at all resolves
   to `null`. (One real bill charged 7.5% duty — exemption is common but
   not universal; don't assume 0 by default.)
+- **Recompute-on-edit: a `total_units` correction on the confirm screen
+  must ripple through the derived rates, not just extraction.** Fixing
+  `total_units` alone doesn't fix anything if the four rates that were
+  computed from the WRONG `total_units` stay frozen on screen — division
+  in `sanitize_extraction()` happens exactly once, server-side, at
+  extraction time; the confirm screen used to treat `energy_rate`/
+  `wheeling_per_unit`/`fac`/`electricity_duty` as static values from then
+  on, so a customer accepting the ToD-sum "Use N?" suggestion for
+  `total_units` (or typing a manual fix) was left staring at rates still on
+  the old, wrong denominator. Fixed in `assets/js/app.js`:
+  `recomputeDerivedRates()` mirrors `sanitize_extraction()`'s and
+  `resolve_electricity_duty_workbook()`'s formulas exactly
+  (`per_unit = total/units`; `duty = duty_rate_pct/100 ×
+  (energy_total+wheeling_total+fac_total+tod_ec_total)/units`) using the
+  raw totals `api/extract.php` now echoes back (see
+  `current_month.energy_total_amount` etc. above), and re-runs on every
+  `total_units` "input" event — real typing, or a synthetic `input` event
+  `makeFieldDiv()`'s suggestion button now dispatches after applying a
+  one-tap fix. Recomputed fields flash briefly (`.field.just-updated` in
+  `assets/css/style.css`) so the ripple is visible, not silent. **Manual
+  overrides win**: typing directly into `energy_rate`/`wheeling_per_unit`/
+  `fac`/`electricity_duty`, or accepting THEIR OWN one-tap suggestion,
+  marks that field `dataset.userEdited = "true"`, and
+  `recomputeDerivedRates()` skips any field so marked — a customer's own
+  correction to one rate is never silently overwritten by a later
+  `total_units` edit, even though the other, non-overridden rates keep
+  recomputing normally. This fix is industrial-only (`buildRateFields()`);
+  commercial's rate fields are read directly off the bill, not derived from
+  totals ÷ units, so there is nothing to recompute there.
 - **`sanctioned_load_kw` — same "copy verbatim, compute nothing" fix.** The
   same class of nondeterminism showed up in unit conversion: the same
   bill's "90 HP" sanctioned-load line came back as raw `90` in one vision
@@ -2171,3 +2246,93 @@ success" report ever comes up for either of them.
     Node/PHP harnesses' direct calls into `sanitize_extraction()`'s
     constituent functions only, not by an actual Claude vision call against
     a real bill image.
+
+- **Two linked bugs found on a real industrial bill (Shivani Stone
+  Crushers), both downstream of the totals-÷-units design the workbook-
+  alignment task above introduced** (`api/extract.php`,
+  `assets/js/app.js`, `assets/css/style.css`). Industrial-only; commercial
+  untouched.
+  - **BUG 1 — wrong `total_units` denominator.** The vision model read
+    `total_units = 2477`, the meter's current-minus-previous reading
+    difference, instead of the correct billed figure `4520` (the BILLING
+    DETAILS "Industrial" consumption row: `4520 units × 7.66 rate =
+    34623.20 Energy Charge`). The bill's Multiplying Factor was `1.00`
+    (assessed/KVAH billing, not a CT/PT-scaled meter), so neither number
+    looked implausible on its own — the bug only showed up once every
+    per-unit rate (`charge_total / total_units`) came out roughly 1.8x too
+    high (`wheeling_per_unit` `2.77` instead of `1.52`, `fac` `0.55`
+    instead of `0.30`). **Fix**: `vision_prompt()` in `api/extract.php` (and
+    `extraction_hardening.md`, kept in sync per this session's convention)
+    now explicitly names the correct source for `total_units` — the
+    tariff-category consumption row, self-checkable via units × rate =
+    that row's Energy Charge — and explicitly forbids both the meter delta
+    and the ToD-slot-unit sum (a related but secondary, sometimes-slightly-
+    different number, e.g. this bill's ToD slots summed to `4562` — kept as
+    the existing ±3%-mismatch reconcile suggestion only, never upgraded to
+    the primary reading). This is a prompt-engineering fix, not a formula
+    change — nothing in `sanitize_extraction()`'s arithmetic was wrong.
+  - **BUG 2 — the confirm screen's derived rates didn't recompute when
+    `total_units` changed.** Division (`charge_total / total_units`)
+    happens exactly once, server-side, at extraction time;
+    `assets/js/app.js`'s confirm screen previously treated `energy_rate`/
+    `wheeling_per_unit`/`fac`/`electricity_duty` as static values from then
+    on. A customer fixing BUG 1's wrong `total_units` — either by tapping
+    the existing ToD-sum "Use N?" suggestion or typing the correct figure
+    by hand — was left staring at rates still computed against the OLD,
+    wrong denominator, silently reintroducing the exact same error BUG 1's
+    fix had just addressed upstream. **Fix**: `api/extract.php` now echoes
+    the raw charge totals (`energy_total_amount`/`wheeling_total_amount`/
+    `fac_total_amount`/`tod_ec_total`/`duty_rate_pct`) into the response's
+    `current_month` shape (previously computed transiently in
+    `sanitize_extraction()` and then discarded — never sent to the
+    browser); `assets/js/app.js`'s new `recomputeDerivedRates()` mirrors
+    `sanitize_extraction()`'s/`resolve_electricity_duty_workbook()`'s exact
+    formulas client-side and re-runs on every `total_units` "input" event —
+    real typing, or the synthetic `input` event `makeFieldDiv()`'s
+    suggestion button now dispatches after applying any one-tap fix (not
+    just `total_units`'s own). Recomputed fields flash briefly
+    (`.field.just-updated`, `assets/css/style.css`) so the ripple is
+    visible. **Manual-override handling** (explicitly asked for by this
+    task): typing directly into one of the four derived fields, or
+    accepting ITS OWN one-tap suggestion, sets that field's
+    `dataset.userEdited = "true"`; `recomputeDerivedRates()` skips any field
+    so marked, so a customer's deliberate correction to one rate is never
+    silently clobbered by a later `total_units` edit, while the other,
+    non-overridden rates keep recomputing normally. This distinction relies
+    on a real DOM quirk: setting `.value` programmatically does NOT fire an
+    `input` event, only actual typing (or an explicit `dispatchEvent`)
+    does — so the recompute function's own writes never mis-flag a field as
+    user-edited.
+  - **Scope note**: this fix is confined to industrial's `buildRateFields()`
+    — commercial's rate fields (`commercial.energy_rate`/`wheeling`/`fac`/
+    etc.) are read directly off the bill, never derived from a
+    totals-÷-units division, so there is nothing for commercial to
+    recompute; `buildCommercialRateFields()` is untouched.
+  - **Verified**: a PHP harness (redefining `resolve_electricity_duty_
+    workbook()` verbatim and grep-checking the real file, per this
+    session's established pattern) reproduces BUG 1 on the wrong
+    denominator (`wheeling_per_unit` ≈`2.77`, `fac` ≈`0.55` on
+    `total_units=2477`) and confirms the fix's exact expected values on the
+    correct denominator: `wheeling_per_unit = 1.52`, `fac = 0.30`,
+    `electricity_duty = 0.6789`, `effective_tariff = 7.3289` (all exactly
+    matching this task's stated numbers). A Node harness — `recomputeDerivedRates()` and `makeFieldDiv()`'s suggestion-button logic
+    redefined verbatim against a minimal fake DOM, grep-checked against the
+    real `assets/js/app.js` for drift — confirms the live 2477→4520
+    units-edit scenario correctly recomputes `wheeling_per_unit`/`fac`/
+    `electricity_duty` to their exact expected values AND flashes the
+    changed field, and separately confirms a manually-overridden
+    `wheeling_per_unit` survives a subsequent `total_units` edit unchanged
+    while `fac` (not overridden) keeps recomputing normally. The industrial
+    Shriram reference (`7.36`) and commercial reference (`10.0621`) were
+    re-run through the existing end-to-end harness and stayed bit-
+    identical. `php -l api/extract.php` and `node --check` on
+    `assets/js/app.js` (plus every other previously-touched JS file) passed
+    with no errors; `assets/js/app.js`'s `?v=` was bumped in `index.html`,
+    and `assets/css/style.css`'s `?v=` was bumped in both `index.html` and
+    `admin/index.html` (shared stylesheet). **Not tested**: no real bill
+    was uploaded through the actual extraction pipeline/vision model, and
+    the recompute logic was never exercised against the real DOM in an
+    actual browser — only against a minimal hand-built fake DOM standing in
+    for the handful of methods (`getElementById`, `classList`, `dataset`,
+    `addEventListener`/`dispatchEvent`) `recomputeDerivedRates()` and the
+    suggestion-button handler actually touch.

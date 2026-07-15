@@ -230,6 +230,19 @@ function blank_extraction() {
             // amount stays visible somewhere, per this task's ask. Not
             // itself validated/collected back from the confirm screen.
             'duty_total_amount' => null,
+            // The five raw inputs sanitize_extraction() divided by
+            // total_units to get energy_rate/wheeling_per_unit/fac/
+            // electricity_duty above. Echoed back to the confirm screen
+            // SOLELY so assets/js/app.js can re-derive those same per-unit
+            // values client-side, live, if the customer edits total_units —
+            // otherwise a units correction leaves the per-unit rates
+            // stranded on the old (wrong) denominator. Not themselves an
+            // editable/validated confirm-screen field.
+            'energy_total_amount' => null,
+            'wheeling_total_amount' => null,
+            'fac_total_amount' => null,
+            'tod_ec_total' => null,
+            'duty_rate_pct' => null,
             'tax_on_sale' => null,
             'tod' => array(
                 't00_06' => array('units' => null, 'rate' => null),
@@ -727,6 +740,13 @@ function parse_bill_text($text) {
     $cm['electricity_duty'] = ($workbookDuty !== null)
         ? $workbookDuty
         : resolve_electricity_duty(null, $dutyTotalAmount, $dutyRatePct, $cm['total_units']);
+    // Echoed back for the same client-side-recompute-on-units-edit reason as
+    // sanitize_extraction() — see blank_extraction()'s comment.
+    $cm['energy_total_amount'] = $energyTotal;
+    $cm['wheeling_total_amount'] = $wheelingTotal;
+    $cm['fac_total_amount'] = $facTotal;
+    $cm['tod_ec_total'] = $todEcTotal;
+    $cm['duty_rate_pct'] = $dutyRatePct;
 
     $cm['tax_on_sale'] = find_number($text, 'Tax\s*on\s*Sale\s*[:\-]?\s*');
 
@@ -1252,6 +1272,21 @@ Return ONLY a single JSON object, no prose, no markdown fences, exactly this sha
 }
 
 Rules:
+- total_units: read this from the BILLING DETAILS / Consumption block — the
+  row for the customer's OWN tariff category (e.g. a row literally labelled
+  "Industrial" or "Commercial"), which lists that row's Units, Rate, and
+  Amount/Energy Charge together (e.g. a row reading "Industrial   4520
+  7.66   34623.20" means total_units = 4520). You can sanity-check your
+  reading: units x rate should equal (or come very close to) that row's
+  printed Energy Charge amount. Do NOT use the current-minus-previous METER
+  READING difference for this field — on assessed/KVAH-billed accounts the
+  billed units can legitimately differ from the raw meter delta (energy_
+  total_amount was computed off the BILLED units, not the meter delta), so
+  using the meter delta here would silently corrupt every per-unit rate
+  derived from total_units downstream. The four TOD slot units (below) are a
+  secondary cross-check only, and their sum may differ slightly from
+  total_units — do not use their sum as your primary reading either, only
+  total_units's own consumption-block row.
 - energy_total_amount / wheeling_total_amount / fac_total_amount / tod_ec_total:
   copy each of these TOTAL RUPEE AMOUNTS for the current month EXACTLY as
   printed in the bill's billing-details section — do NOT divide by units,
@@ -1400,6 +1435,15 @@ function sanitize_extraction($data) {
     // Kept for display/logging only — the tariff calc no longer uses this
     // (see resolve_electricity_duty_workbook()).
     $cm['duty_total_amount'] = $rawDutyTotal;
+    // Echoed back verbatim so the confirm screen can re-derive energy_rate/
+    // wheeling_per_unit/fac/electricity_duty client-side if total_units is
+    // edited after the fact (reconcile-button tap or manual correction) —
+    // see blank_extraction()'s comment on these fields.
+    $cm['energy_total_amount'] = $rawEnergyTotal;
+    $cm['wheeling_total_amount'] = $rawWheelingTotal;
+    $cm['fac_total_amount'] = $rawFacTotal;
+    $cm['tod_ec_total'] = $rawTodEcTotal;
+    $cm['duty_rate_pct'] = $rawDutyRatePct;
 
     $workbookDuty = resolve_electricity_duty_workbook($rawDutyRatePct, $rawEnergyTotal, $rawWheelingTotal, $rawFacTotal, $rawTodEcTotal, $cm['total_units']);
     if ($workbookDuty !== null) {

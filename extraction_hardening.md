@@ -86,6 +86,22 @@ Return ONLY a single JSON object, no prose, no markdown fences, exactly this sha
 }
 
 Rules:
+- total_units: read this from the BILLING DETAILS / Consumption block — the
+  row for the customer's OWN tariff category (e.g. a row literally labelled
+  "Industrial" or "Commercial"), which lists that row's Units, Rate, and
+  Amount/Energy Charge together (e.g. a row reading "Industrial   4520
+  7.66   34623.20" means total_units = 4520). You can sanity-check your
+  reading: units x rate should equal (or come very close to) that row's
+  printed Energy Charge amount. Do NOT use the current-minus-previous METER
+  READING difference for this field — on assessed/KVAH-billed accounts the
+  billed units can legitimately differ from the raw meter delta (a real
+  bill's Multiplying Factor of 1.00 still had a billed-units figure that
+  differed from the meter delta), and using the meter delta here would
+  silently corrupt every per-unit rate derived from total_units downstream
+  (energy_rate, wheeling_per_unit, fac, electricity_duty all divide by it).
+  The four TOD slot units (below) are a secondary cross-check only, and
+  their sum may differ slightly from total_units — do not use their sum as
+  your primary reading either, only total_units's own consumption-block row.
 - All PER-UNIT rate fields still in this shape (duty_per_unit, tax_on_sale,
   and every tod rate) MUST be in RUPEES PER UNIT. MSEDCL prints some of these
   in "Ps/U" (paise per unit). If a value is labelled Ps/U or paise, DIVIDE BY
@@ -271,6 +287,15 @@ Implement the pipeline exactly as described in extraction_hardening.md:
      null, or >40% fields need review), show a "we couldn't read this clearly —
      upload a clearer photo, or enter the values yourself" state instead of the
      normal confirm form. Always allow full manual entry as a fallback.
+   - Industrial's energy_rate/wheeling_per_unit/fac/electricity_duty are
+     DERIVED from total_units (charge_total/total_units, or the duty-rate%
+     formula) — editing total_units (by hand, or via its own "Use N?"
+     reconcile suggestion) must live-recompute all four, mirroring
+     api/extract.php's formulas exactly, or a units correction leaves the
+     rates stranded on the old denominator. A field the customer has
+     directly edited/accepted a suggestion for should not be silently
+     overwritten by a later total_units recompute. See SPEC.md's "CRITICAL
+     extraction gotchas" and Owner notes for the real-bill bug this fixes.
 
 4. Keep the JSON schema and field names identical to SPEC.md so the later
    formulation/engine steps are unaffected.
